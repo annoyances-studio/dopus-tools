@@ -28,6 +28,20 @@ Each plugin is self-contained (CMake + its own README). The **Opus Plugin SDK** 
 from https://support.gpsoft.com.au/resources and point `-DOPUS_SDK_DIR` at it. The plugin `core/` + its unit
 tests build **without** the SDK (that's what CI runs); only the final DLL link needs it.
 
+## Releasing
+
+The plugin DLL is built locally (it needs the Opus SDK, so CI can't produce it) and published
+via [`release.ps1`](release.ps1) — plain REST, no vendor CLI, so it ports across forges by editing one
+settings block. Put a fine-grained PAT (Contents: write) in `$env:RELEASE_TOKEN`, then:
+
+```powershell
+$env:RELEASE_TOKEN = op read "op://Private/dopus-tools release/token"
+./release.ps1 -Tag v0.1.0 -Notes "Animated WebP + GIF viewer for Directory Opus."
+```
+
+It builds the x64 Release DLL, creates the release (tagging `main`), and uploads `animview.dll` + the
+libwebp notice.
+
 ## License
 
 MPL-2.0 — see [`LICENSE`](LICENSE). Per-plugin third-party notices live beside each plugin.
