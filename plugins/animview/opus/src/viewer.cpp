@@ -24,10 +24,14 @@ namespace animview {
 namespace {
 
 const wchar_t kClassName[] = L"animview.webp.viewer";
-constexpr UINT_PTR kTimerId = 1;
+constexpr UINT_PTR kTimerId = 1;       // frame animation
+constexpr UINT_PTR kHideTimerId = 2;   // auto-hide the playback bar
 constexpr int kMinFrameMs = 10;
 constexpr int kZoomMin = 1;
 constexpr int kZoomMax = 1600;
+constexpr int kBarHeight = 40;
+constexpr int kBtnW = 36;
+constexpr int kHideDelayMs = 2500;
 
 // Context-menu command IDs (our File > animview submenu items).
 enum { CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3 };
@@ -55,6 +59,11 @@ struct ViewerState {
   int cur_index = -1;  // frame currently displayed (-1 = none yet)
   DVPCONTEXTMENUITEM menu_items[9]{};
   std::wstring menu_labels[9];
+
+  // Auto-hiding playback bar (animations only).
+  bool bar_visible = false;
+  bool mouse_tracking = false;  // TrackMouseEvent armed (for WM_MOUSELEAVE)
+  bool scrubbing = false;       // dragging the progress bar
 };
 
 ViewerState* GetState(HWND hWnd) {
@@ -240,6 +249,172 @@ void SendSizeChange(ViewerState* s, const RECT& client) {
   SendMessageW(GetParent(s->hwnd), WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&n));
 }
 
+// ---- Auto-hiding playback bar ----------------------------------------------
+
+struct BarLayout {
+  bool valid = false;
+  RECT bar{}, prev{}, play{}, next{}, track{}, label{};
+};
+
+BarLayout ComputeBar(const ViewerState* s, const RECT& client) {
+  BarLayout b;
+  const int cw = client.right - client.left;
+  const int ch = client.bottom - client.top;
+  if (s->frame_count <= 1 || cw < 220 || ch < kBarHeight + 16) return b;
+  b.valid = true;
+  const int by = ch - kBarHeight;
+  b.bar = {0, by, cw, ch};
+  int x = 8;
+  auto btn = [&](RECT& r) { r = {x, by, x + kBtnW, ch}; x += kBtnW; };
+  btn(b.prev);
+  btn(b.play);
+  btn(b.next);
+  x += 10;
+  const int labelW = 86;
+  b.label = {cw - labelW - 10, by, cw - 10, ch};
+  b.track = {x, by, b.label.left - 14, ch};
+  return b;
+}
+
+void FillPoly(HDC hdc, const POINT* pts, int n, COLORREF c) {
+  HBRUSH br = CreateSolidBrush(c);
+  HGDIOBJ ob = SelectObject(hdc, br);
+  HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
+  Polygon(hdc, pts, n);
+  SelectObject(hdc, op);
+  SelectObject(hdc, ob);
+  DeleteObject(br);
+}
+
+void FillRC(HDC hdc, int l, int t, int r, int b, COLORREF c) {
+  RECT rc{l, t, r, b};
+  HBRUSH br = CreateSolidBrush(c);
+  FillRect(hdc, &rc, br);
+  DeleteObject(br);
+}
+
+// A translucent solid fill (AlphaBlend a 1x1 colour at constant alpha).
+void AlphaFillRect(HDC hdc, const RECT& r, COLORREF color, BYTE alpha) {
+  HDC mem = CreateCompatibleDC(hdc);
+  if (!mem) return;
+  BITMAPINFO bi;
+  FillBitmapInfoTopDown(&bi, 1, 1);
+  void* bits = nullptr;
+  HBITMAP bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  if (bmp && bits) {
+    auto* p = static_cast<uint8_t*>(bits);
+    p[0] = GetBValue(color); p[1] = GetGValue(color); p[2] = GetRValue(color); p[3] = 255;
+    HGDIOBJ old = SelectObject(mem, bmp);
+    BLENDFUNCTION bf{AC_SRC_OVER, 0, alpha, 0};
+    AlphaBlend(hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, mem, 0, 0, 1, 1, bf);
+    SelectObject(mem, old);
+  }
+  if (bmp) DeleteObject(bmp);
+  DeleteDC(mem);
+}
+
+void DrawBar(ViewerState* s, HDC hdc, const BarLayout& b) {
+  const COLORREF fg = RGB(235, 235, 238);
+  const COLORREF accent = RGB(90, 170, 255);
+  const int g = 7;  // glyph half-size
+
+  AlphaFillRect(hdc, b.bar, RGB(18, 18, 22), 190);
+
+  // Previous frame: |<
+  {
+    const int cx = (b.prev.left + b.prev.right) / 2, cy = (b.prev.top + b.prev.bottom) / 2;
+    FillRC(hdc, cx - g - 4, cy - g, cx - g - 1, cy + g, fg);
+    POINT p[3] = {{cx + g, cy - g}, {cx + g, cy + g}, {cx - g, cy}};
+    FillPoly(hdc, p, 3, fg);
+  }
+  // Play (>) or Pause (||)
+  {
+    const int cx = (b.play.left + b.play.right) / 2, cy = (b.play.top + b.play.bottom) / 2;
+    if (s->paused) {
+      POINT p[3] = {{cx - g, cy - g}, {cx - g, cy + g}, {cx + g, cy}};
+      FillPoly(hdc, p, 3, fg);
+    } else {
+      FillRC(hdc, cx - g, cy - g, cx - 2, cy + g, fg);
+      FillRC(hdc, cx + 2, cy - g, cx + g, cy + g, fg);
+    }
+  }
+  // Next frame: >|
+  {
+    const int cx = (b.next.left + b.next.right) / 2, cy = (b.next.top + b.next.bottom) / 2;
+    POINT p[3] = {{cx - g, cy - g}, {cx - g, cy + g}, {cx + g, cy}};
+    FillPoly(hdc, p, 3, fg);
+    FillRC(hdc, cx + g + 1, cy - g, cx + g + 4, cy + g, fg);
+  }
+
+  // Progress track + fill + thumb.
+  const int ty = (b.track.top + b.track.bottom) / 2;
+  const int tw = b.track.right - b.track.left;
+  const int fc = static_cast<int>((std::max)(static_cast<size_t>(1), s->frame_count));
+  const double frac = (fc > 1 && s->cur_index >= 0) ? static_cast<double>(s->cur_index) / (fc - 1) : 0.0;
+  const int thumbX = b.track.left + static_cast<int>(frac * tw + 0.5);
+  for (int dy = -1; dy <= 1; ++dy) {  // 3px line via rects (no pen juggling)
+    FillRC(hdc, b.track.left, ty + dy, b.track.right, ty + dy + 1, RGB(90, 90, 96));
+    FillRC(hdc, b.track.left, ty + dy, thumbX, ty + dy + 1, accent);
+  }
+  {
+    HBRUSH br = CreateSolidBrush(fg);
+    HGDIOBJ ob = SelectObject(hdc, br);
+    HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Ellipse(hdc, thumbX - 6, ty - 6, thumbX + 6, ty + 6);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    DeleteObject(br);
+  }
+
+  // Frame counter "N / M".
+  wchar_t txt[32];
+  wsprintfW(txt, L"%d / %d", s->cur_index + 1, static_cast<int>(s->frame_count));
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, fg);
+  RECT lab = b.label;
+  DrawTextW(hdc, txt, -1, &lab, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+}
+
+void InvalidateBar(ViewerState* s) {
+  RECT client;
+  GetClientRect(s->hwnd, &client);
+  const BarLayout b = ComputeBar(s, client);
+  RECT r = b.valid ? b.bar : client;
+  InvalidateRect(s->hwnd, &r, FALSE);
+}
+
+void ShowBar(ViewerState* s) {
+  if (s->frame_count <= 1) return;
+  const bool was = s->bar_visible;
+  s->bar_visible = true;
+  SetTimer(s->hwnd, kHideTimerId, kHideDelayMs, nullptr);  // (re)start idle timer
+  if (!was) InvalidateBar(s);
+}
+
+void HideBar(ViewerState* s) {
+  KillTimer(s->hwnd, kHideTimerId);
+  if (s->bar_visible && !s->scrubbing) {
+    s->bar_visible = false;
+    InvalidateBar(s);
+  }
+}
+
+void SeekBarToX(ViewerState* s, int x, const RECT& track) {
+  const int fc = static_cast<int>((std::max)(static_cast<size_t>(1), s->frame_count));
+  const int w = static_cast<int>(track.right - track.left);
+  if (w <= 0 || !s->source) return;
+  int rel = x - static_cast<int>(track.left);
+  rel = (std::max)(0, (std::min)(w, rel));
+  int idx = (fc > 1) ? (rel * (fc - 1) + w / 2) / w : 0;
+  idx = (std::max)(0, (std::min)(fc - 1, idx));
+  if (idx == s->cur_index) return;
+  Frame f;
+  if (s->source->SeekToFrame(static_cast<size_t>(idx), f)) {
+    s->cur_index = idx;
+    ShowFrame(s, f);
+  }
+}
+
 void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
   const int cw = client.right - client.left;
   const int ch = client.bottom - client.top;
@@ -273,6 +448,11 @@ void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
                   s->composited.data(), &src, DIB_RGB_COLORS, SRCCOPY);
   }
 
+  if (s->bar_visible) {
+    const BarLayout bl = ComputeBar(s, client);
+    if (bl.valid) DrawBar(s, target, bl);
+  }
+
   if (target == mem) {
     BitBlt(hdc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
   }
@@ -284,6 +464,9 @@ void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
 
 void LoadFromBytes(ViewerState* s, const uint8_t* data, size_t len) {
   KillTimer(s->hwnd, kTimerId);
+  KillTimer(s->hwnd, kHideTimerId);
+  s->bar_visible = false;
+  s->scrubbing = false;
   s->has_image = false;
   s->composited.clear();
 
@@ -455,6 +638,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_TIMER:
       if (wParam == kTimerId) AdvanceFrame(s);
+      else if (wParam == kHideTimerId) HideBar(s);
       return 0;
 
     case WM_SIZE:
@@ -512,12 +696,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONDOWN: {
+      const int mx = static_cast<short>(LOWORD(lParam));
+      const int my = static_cast<short>(HIWORD(lParam));
       RECT client;
       GetClientRect(hWnd, &client);
+
+      // Playback bar first (if visible and the click lands on it).
+      if (s->bar_visible) {
+        const BarLayout b = ComputeBar(s, client);
+        POINT pt{mx, my};
+        if (b.valid && PtInRect(&b.bar, pt)) {
+          if (PtInRect(&b.prev, pt)) { StepPrev(s); return 0; }
+          if (PtInRect(&b.play, pt)) {
+            if (s->paused) ResumePlayback(s); else PausePlayback(s);
+            return 0;
+          }
+          if (PtInRect(&b.next, pt)) { StepNext(s); return 0; }
+          if (PtInRect(&b.track, pt)) {
+            s->scrubbing = true;
+            PausePlayback(s);
+            SetCapture(hWnd);
+            SeekBarToX(s, mx, b.track);
+            return 0;
+          }
+          return 0;  // click on bar background: consume, don't pan
+        }
+      }
+
       if (Scrollable(s, client)) {  // only hijack the drag when there's room to pan
         s->panning = true;
-        s->pan_anchor.x = static_cast<short>(LOWORD(lParam));
-        s->pan_anchor.y = static_cast<short>(HIWORD(lParam));
+        s->pan_anchor.x = mx;
+        s->pan_anchor.y = my;
         s->pan_anchor_offset = s->offset;
         SetCapture(hWnd);
         SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
@@ -526,10 +735,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       break;  // at fit, pass clicks through to Opus (advance etc.)
     }
 
-    case WM_MOUSEMOVE:
+    case WM_MOUSEMOVE: {
+      const int mx = static_cast<short>(LOWORD(lParam));
+      const int my = static_cast<short>(HIWORD(lParam));
+      if (!s->mouse_tracking) {
+        TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hWnd, 0};
+        TrackMouseEvent(&tme);
+        s->mouse_tracking = true;
+      }
+      if (s->scrubbing) {
+        RECT client;
+        GetClientRect(hWnd, &client);
+        const BarLayout b = ComputeBar(s, client);
+        if (b.valid) SeekBarToX(s, mx, b.track);
+        return 0;
+      }
       if (s->panning) {
-        const int mx = static_cast<short>(LOWORD(lParam));
-        const int my = static_cast<short>(HIWORD(lParam));
         RECT client;
         GetClientRect(hWnd, &client);
         SIZE disp;
@@ -543,9 +764,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
       }
+      ShowBar(s);  // reveal the playback bar + reset its idle timer
       break;
+    }
+
+    case WM_MOUSELEAVE:
+      s->mouse_tracking = false;
+      HideBar(s);
+      return 0;
 
     case WM_LBUTTONUP:
+      if (s->scrubbing) {
+        s->scrubbing = false;
+        ReleaseCapture();
+        return 0;
+      }
       if (s->panning) {
         s->panning = false;
         ReleaseCapture();
@@ -555,6 +788,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_CAPTURECHANGED:
       s->panning = false;
+      s->scrubbing = false;
       return 0;
 
     case WM_ERASEBKGND:

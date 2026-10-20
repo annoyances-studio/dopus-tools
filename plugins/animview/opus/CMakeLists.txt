@@ -25,6 +25,6 @@ target_include_directories(animview PRIVATE
   include
 )
 
-target_link_libraries(animview PRIVATE animview_core)
+target_link_libraries(animview PRIVATE animview_core msimg32)  # msimg32 = AlphaBlend
 
 target_compile_definitions(animview PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
