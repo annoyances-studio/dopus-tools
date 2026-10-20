@@ -62,8 +62,8 @@ struct ViewerState {
   // Playback.
   bool paused = false;
   int cur_index = -1;  // frame currently displayed (-1 = none yet)
-  DVPCONTEXTMENUITEM menu_items[4]{};
-  std::wstring menu_labels[4];
+  DVPCONTEXTMENUITEM menu_items[9]{};
+  std::wstring menu_labels[9];
 };
 
 ViewerState* GetState(HWND hWnd) {
@@ -358,21 +358,32 @@ void ClearImage(ViewerState* s) {
   InvalidateRect(s->hwnd, nullptr, TRUE);
 }
 
-// Build the right-click playback menu (only for multi-frame images). The labels
-// are kept in ViewerState so the pointers stay valid after we return to Opus.
+// Items Opus merges into its own right-click menu, grouped under an "animview"
+// submenu (playback for animations, plus zoom). Labels are kept in ViewerState so
+// the pointers stay valid after we return to Opus.
 DVPCONTEXTMENUITEM* BuildContextMenu(ViewerState* s, DWORD* pNum) {
-  if (s->frame_count <= 1) {
-    if (pNum) *pNum = 0;
-    return nullptr;
+  int n = 0;
+  auto add = [&](const wchar_t* label, DWORD flags, UINT id) {
+    s->menu_labels[n] = label ? label : L"";
+    s->menu_items[n].lpszLabel = label ? const_cast<LPWSTR>(s->menu_labels[n].c_str()) : nullptr;
+    s->menu_items[n].dwFlags = flags;
+    s->menu_items[n].uID = id;
+    ++n;
+  };
+
+  add(L"animview", DVPCMF_BEGINSUBMENU, 0);  // submenu header
+  if (s->frame_count > 1) {
+    add(s->paused ? L"Play" : L"Pause", 0, CMD_PLAYPAUSE);
+    add(L"Previous frame", 0, CMD_PREV);
+    add(L"Next frame", 0, CMD_NEXT);
+    add(nullptr, DVPCMF_SEPARATOR, 0);
   }
-  s->menu_labels[0] = s->paused ? L"Play" : L"Pause";
-  s->menu_labels[2] = L"Previous frame";
-  s->menu_labels[3] = L"Next frame";
-  s->menu_items[0] = {const_cast<LPWSTR>(s->menu_labels[0].c_str()), 0, CMD_PLAYPAUSE};
-  s->menu_items[1] = {nullptr, DVPCMF_SEPARATOR, 0};
-  s->menu_items[2] = {const_cast<LPWSTR>(s->menu_labels[2].c_str()), 0, CMD_PREV};
-  s->menu_items[3] = {const_cast<LPWSTR>(s->menu_labels[3].c_str()), 0, CMD_NEXT};
-  if (pNum) *pNum = 4;
+  add(L"Zoom in", 0, CMD_ZOOMIN);
+  add(L"Zoom out", 0, CMD_ZOOMOUT);
+  add(L"Fit to window", 0, CMD_FIT);
+  add(L"Actual size (100%)", DVPCMF_ENDSUBMENU, CMD_ACTUAL);  // closes the submenu
+
+  if (pNum) *pNum = static_cast<DWORD>(n);
   return s->menu_items;
 }
 
@@ -418,6 +429,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case CMD_PREV: StepPrev(s); return 0;
         case CMD_NEXT: StepNext(s); return 0;
+        case CMD_ZOOMIN: {
+          const int p = CurrentPercent(s);
+          SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
+          return 0;
+        }
+        case CMD_ZOOMOUT: {
+          const int p = CurrentPercent(s);
+          SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
+          return 0;
+        }
+        case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); return 0;
+        case CMD_ACTUAL: SetZoomReq(s, 100); return 0;
         default: break;
       }
       break;
@@ -592,54 +615,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CAPTURECHANGED:
       s->panning = false;
       return 0;
-
-    case WM_CONTEXTMENU: {
-      // Our own popup — zoom (so full-screen / no-menu-bar still has it) plus
-      // playback for animations. Reliable regardless of Opus's own menu.
-      if (!s->has_image) break;
-      POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-      if (pt.x == -1 && pt.y == -1) {  // keyboard-invoked
-        RECT r;
-        GetClientRect(hWnd, &r);
-        pt.x = r.right / 2;
-        pt.y = r.bottom / 2;
-        ClientToScreen(hWnd, &pt);
-      }
-      HMENU menu = CreatePopupMenu();
-      if (menu) {
-        if (s->frame_count > 1) {
-          AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
-          AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
-          AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
-          AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        }
-        AppendMenuW(menu, MF_STRING, CMD_ZOOMIN, L"Zoom in");
-        AppendMenuW(menu, MF_STRING, CMD_ZOOMOUT, L"Zoom out");
-        AppendMenuW(menu, MF_STRING, CMD_FIT, L"Fit to window");
-        AppendMenuW(menu, MF_STRING, CMD_ACTUAL, L"Actual size (100%)");
-        const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y,
-                                       0, hWnd, nullptr);
-        DestroyMenu(menu);
-        const int p = CurrentPercent(s);
-        switch (cmd) {
-          case CMD_PLAYPAUSE:
-            if (s->paused) ResumePlayback(s); else PausePlayback(s);
-            break;
-          case CMD_PREV: StepPrev(s); break;
-          case CMD_NEXT: StepNext(s); break;
-          case CMD_ZOOMIN:
-            SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
-            break;
-          case CMD_ZOOMOUT:
-            SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
-            break;
-          case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); break;
-          case CMD_ACTUAL: SetZoomReq(s, 100); break;
-          default: break;
-        }
-      }
-      return 0;
-    }
 
     case WM_ERASEBKGND:
       return 1;  // painted in WM_PAINT
