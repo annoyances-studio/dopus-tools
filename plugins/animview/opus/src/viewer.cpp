@@ -35,8 +35,11 @@ enum {
   CMD_ZOOMIN = 4, CMD_ZOOMOUT = 5, CMD_FIT = 6, CMD_ACTUAL = 7,
 };
 
-// Remembered across viewer instances so zoom doesn't reset on every new image.
+// Remembered USER zoom, kept across viewer instances so it doesn't reset per
+// image. g_have_user_zoom stays false until the user actually changes zoom, so the
+// very first image still uses Opus's initial zoom.
 int g_last_zoom = ZOOM_FITPAGE;
+bool g_have_user_zoom = false;
 
 struct ViewerState {
   HWND hwnd = nullptr;
@@ -257,6 +260,7 @@ void SendSizeChange(ViewerState* s, const RECT& client) {
 void SetZoomReq(ViewerState* s, int req) {
   s->zoom_req = req;
   g_last_zoom = req;
+  g_have_user_zoom = true;  // user chose this; keep it across images
   s->offset = {0, 0};
   UpdateScrollbars(s);
   RECT client;
@@ -376,7 +380,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_CREATE) {
     auto* s = new ViewerState();
     s->hwnd = hWnd;
-    s->zoom_req = g_last_zoom;  // inherit the last zoom so it doesn't reset
+    s->zoom_req = g_have_user_zoom ? g_last_zoom : ZOOM_FITPAGE;  // keep user's zoom
     SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
     return 0;
   }
@@ -438,11 +442,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (lParam) *reinterpret_cast<LPSIZE>(lParam) = s->canvas;
       return TRUE;
 
-    case DVPLUGINMSG_SETZOOM:
+    case DVPLUGINMSG_SETZOOM: {
+      // Opus's per-image INITIAL zoom. Once the user has chosen a zoom, keep
+      // theirs (Opus otherwise resets every image to its default, e.g. 100%).
+      s->zoom_req = g_have_user_zoom ? g_last_zoom : static_cast<int>(wParam);
+      s->offset = {0, 0};
+      UpdateScrollbars(s);
+      RECT client;
+      if (GetClientRect(hWnd, &client)) SendSizeChange(s, client);
+      InvalidateRect(hWnd, nullptr, FALSE);
+      return 0;
+    }
+
     case DVPLUGINMSG_ZOOM: {
+      // A user zoom action (toolbar / wheel) — honour and remember it.
       s->zoom_req = static_cast<int>(wParam);
-      g_last_zoom = s->zoom_req;  // remember across images
-      s->offset = {0, 0};  // predictable: re-centre on a zoom change
+      g_last_zoom = s->zoom_req;
+      g_have_user_zoom = true;
+      s->offset = {0, 0};
       UpdateScrollbars(s);
       RECT client;
       if (GetClientRect(hWnd, &client)) SendSizeChange(s, client);
