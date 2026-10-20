@@ -1,0 +1,25 @@
+# Builds animview's core/ + runs all unit tests WITHOUT the Opus SDK (libwebp is
+# fetched by CMake; WIC is part of Windows). The plugin DLL needs the SDK and is a
+# local release step, so it is intentionally not built here.
+
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  animview:
+    runs-on: windows-latest
+    env:
+      SRC_DIR: plugins/animview
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (core + tests; Opus SDK absent -> DLL skipped)
+        run: cmake -S "${{ env.SRC_DIR }}" -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
