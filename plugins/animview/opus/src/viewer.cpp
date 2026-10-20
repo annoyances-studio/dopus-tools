@@ -29,8 +29,14 @@ constexpr int kMinFrameMs = 10;
 constexpr int kZoomMin = 1;
 constexpr int kZoomMax = 1600;
 
-// Context-menu command IDs (returned via WM_COMMAND when Opus runs our items).
-enum { CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3 };
+// Context-menu / popup command IDs.
+enum {
+  CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3,
+  CMD_ZOOMIN = 4, CMD_ZOOMOUT = 5, CMD_FIT = 6, CMD_ACTUAL = 7,
+};
+
+// Remembered across viewer instances so zoom doesn't reset on every new image.
+int g_last_zoom = ZOOM_FITPAGE;
 
 struct ViewerState {
   HWND hwnd = nullptr;
@@ -246,6 +252,24 @@ void SendSizeChange(ViewerState* s, const RECT& client) {
   SendMessageW(GetParent(s->hwnd), WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&n));
 }
 
+// Apply a zoom request (ZOOM_FITPAGE / ZOOM_ORIGINAL / percent), remember it, and
+// refresh. Used by our popup's zoom items.
+void SetZoomReq(ViewerState* s, int req) {
+  s->zoom_req = req;
+  g_last_zoom = req;
+  s->offset = {0, 0};
+  UpdateScrollbars(s);
+  RECT client;
+  if (GetClientRect(s->hwnd, &client)) SendSizeChange(s, client);
+  InvalidateRect(s->hwnd, nullptr, FALSE);
+}
+
+int CurrentPercent(ViewerState* s) {
+  RECT c;
+  GetClientRect(s->hwnd, &c);
+  return EffectivePercent(s, c);
+}
+
 void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
   const int cw = client.right - client.left;
   const int ch = client.bottom - client.top;
@@ -352,6 +376,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_CREATE) {
     auto* s = new ViewerState();
     s->hwnd = hWnd;
+    s->zoom_req = g_last_zoom;  // inherit the last zoom so it doesn't reset
     SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
     return 0;
   }
@@ -416,6 +441,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case DVPLUGINMSG_SETZOOM:
     case DVPLUGINMSG_ZOOM: {
       s->zoom_req = static_cast<int>(wParam);
+      g_last_zoom = s->zoom_req;  // remember across images
       s->offset = {0, 0};  // predictable: re-centre on a zoom change
       UpdateScrollbars(s);
       RECT client;
@@ -438,12 +464,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       InvalidateRect(hWnd, nullptr, TRUE);
       return 0;
 
-    case DVPLUGINMSG_RESIZE: {
-      const int left = LOWORD(wParam), top = HIWORD(wParam);
-      const int w = LOWORD(lParam), h = HIWORD(lParam);
-      SetWindowPos(hWnd, nullptr, left, top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    case DVPLUGINMSG_RESIZE:
+      // Opus has ALREADY resized our window (we also get a WM_SIZE). Repositioning
+      // ourselves here mis-placed the window relative to Opus's menu/toolbar, which
+      // threw off the scrollbars. Just react, like Leo's "fallthrough to WM_SIZE".
+      UpdateScrollbars(s);
+      InvalidateRect(hWnd, nullptr, FALSE);
       return 0;
-    }
 
     case WM_TIMER:
       if (wParam == kTimerId) AdvanceFrame(s);
@@ -550,9 +577,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
 
     case WM_CONTEXTMENU: {
-      // Our own popup for playback — reliable regardless of whether Opus surfaces
-      // the DVPLUGINMSG_ADDCONTEXTMENU items.
-      if (s->frame_count <= 1) break;  // nothing to control on a still
+      // Our own popup — zoom (so full-screen / no-menu-bar still has it) plus
+      // playback for animations. Reliable regardless of Opus's own menu.
+      if (!s->has_image) break;
       POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
       if (pt.x == -1 && pt.y == -1) {  // keyboard-invoked
         RECT r;
@@ -563,19 +590,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       HMENU menu = CreatePopupMenu();
       if (menu) {
-        AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
-        AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
+        if (s->frame_count > 1) {
+          AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
+          AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
+          AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
+          AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        AppendMenuW(menu, MF_STRING, CMD_ZOOMIN, L"Zoom in");
+        AppendMenuW(menu, MF_STRING, CMD_ZOOMOUT, L"Zoom out");
+        AppendMenuW(menu, MF_STRING, CMD_FIT, L"Fit to window");
+        AppendMenuW(menu, MF_STRING, CMD_ACTUAL, L"Actual size (100%)");
         const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y,
                                        0, hWnd, nullptr);
         DestroyMenu(menu);
+        const int p = CurrentPercent(s);
         switch (cmd) {
           case CMD_PLAYPAUSE:
             if (s->paused) ResumePlayback(s); else PausePlayback(s);
             break;
           case CMD_PREV: StepPrev(s); break;
           case CMD_NEXT: StepNext(s); break;
+          case CMD_ZOOMIN:
+            SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
+            break;
+          case CMD_ZOOMOUT:
+            SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
+            break;
+          case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); break;
+          case CMD_ACTUAL: SetZoomReq(s, 100); break;
           default: break;
         }
       }
