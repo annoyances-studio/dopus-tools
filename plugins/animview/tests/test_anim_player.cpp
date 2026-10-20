@@ -57,6 +57,10 @@ int main() {
   Check(p.NextFrame(f) && PixelIs(f, 10, 20, 30), "loops back to frame 0");
   Check(f.duration_ms == 50, "looped frame duration 50ms");
 
+  // SeekToFrame (used by "previous frame" stepping).
+  Check(p.SeekToFrame(2, f) && PixelIs(f, 70, 80, 90), "seek to frame 2");
+  Check(p.SeekToFrame(0, f) && PixelIs(f, 10, 20, 30), "seek back to frame 0");
+
   if (g_failures == 0) {
     std::printf("All animview_anim tests passed.\n");
     return 0;

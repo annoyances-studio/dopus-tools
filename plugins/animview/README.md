@@ -1,12 +1,13 @@
-# animview — animated WebP (and, later, fixed GIF) for Directory Opus
+# animview — animated WebP + GIF viewer for Directory Opus
 
 A native Opus viewer plugin. See [`REVIEW.md`](REVIEW.md) for the architecture, the GIF-OOM diagnosis of the
-fork base, and the decode plan.
+old plugin, and the decode plan.
 
-**Status: increment #4 — WebP + GIF.** Plays animated **WebP** (libwebp) and **GIF** (WIC — no extra
-dependency) in one viewer window, fit-to-window + zoom, thumbnails from the first frame. Only the current
-composited canvas is ever held (O(1) memory) — the GIF out-of-memory of the old plugin is gone by design.
-Deferred: pan/scrollbars when zoomed past the window.
+**Status: working.** Plays animated **WebP** (libwebp) and **GIF** (WIC — no extra dependency) in one viewer
+window: fit-to-window + zoom, **pan/scroll** when zoomed (scrollbars, wheel, drag), **playback controls**
+(right-click: Pause/Play · Previous/Next frame; plus media keys), thumbnails from the first frame. Only the
+current composited canvas is ever held (O(1) memory) — the GIF out-of-memory of the old plugin is gone by
+design.
 
 **To replace the old GIF plugin:** both claim `.gif`, and **Opus loads whichever viewer plugin is ordered
 first** (Preferences → Plugins → Viewer — drag `animview` above the old *Animated GIF* plugin, or disable/remove
@@ -55,9 +56,8 @@ The plugin lands at `out/build/x64-release/opus/animview.dll`.
    `C:\Program Files\GPSoftware\Directory Opus\Viewers\animview.dll` — confirmed working on Opus 12 x64,
    2026-10-19. (The viewer plugin API is v4, which Opus 12 and 13 both load; the DLL must match Opus's
    bitness — 64-bit here.) The DLL goes straight in `Viewers`, not a per-plugin subfolder.
-2. In Opus: **Preferences → Plugins → Viewer** → *Refresh* (or restart Opus). "WebP Animation" should appear.
-3. Increment #1 check: the plugin lists as loaded. (It claims only animated `.webp`; still `.webp` stays with
-   the built-in handler. Nothing displays yet — that's increment #2.)
+2. In Opus: **Preferences → Plugins → Viewer** → *Refresh* (or restart Opus). "animview" should appear.
+   For GIF, order it **above** the old *Animated GIF* plugin (Opus uses whichever viewer is listed first).
 
 ## Roadmap
 
@@ -68,8 +68,11 @@ The plugin lands at `out/build/x64-release/opus/animview.dll`.
   canvas kept (O(1) memory), painted with `StretchDIBits` (no DDB). ✅
 - **#4:** GIF via WIC behind a format-agnostic `AnimSource` (factory picks WebP/GIF by header); one plugin
   replaces Leo's and fixes its OOM. ✅
-- **#3b (deferred):** pan/scrollbars when zoomed past the window; mouse-wheel/drag.
-- **Before public repo:** add MPL headers (done) + `LICENSE`/`THIRD-PARTY` (done); keep the SDK a prerequisite.
+- **#3b:** pan/scroll when zoomed — scrollbars (recomputed as they change the client), mouse-wheel, left-drag
+  panning (only when zoomed; clicks pass to Opus at fit). ✅
+- **#5:** playback controls — right-click **Pause/Play · Previous/Next frame** (`DVPLUGINMSG_ADDCONTEXTMENU`
+  → `WM_COMMAND`) + media keys (`DVPLUGINMSG_APPCOMMAND`); frame stepping via `AnimSource::SeekToFrame`. ✅
+- **Maybe later:** an on-image toolbar (OG-style) if the right-click menu isn't enough.
 
 ## Continuous integration
 

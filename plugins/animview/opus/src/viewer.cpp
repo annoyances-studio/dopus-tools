@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "viewer plugins.h"
@@ -27,6 +28,9 @@ constexpr int kMinFrameMs = 10;
 constexpr int kZoomMin = 1;
 constexpr int kZoomMax = 1600;
 
+// Context-menu command IDs (returned via WM_COMMAND when Opus runs our items).
+enum { CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3 };
+
 struct ViewerState {
   HWND hwnd = nullptr;
   std::unique_ptr<AnimSource> source;  // WebP or GIF
@@ -43,6 +47,12 @@ struct ViewerState {
   bool panning = false;
   POINT pan_anchor{0, 0};
   SIZE pan_anchor_offset{0, 0};
+
+  // Playback.
+  bool paused = false;
+  int cur_index = -1;  // frame currently displayed (-1 = none yet)
+  DVPCONTEXTMENUITEM menu_items[4]{};
+  std::wstring menu_labels[4];
 };
 
 ViewerState* GetState(HWND hWnd) {
@@ -66,16 +76,55 @@ void CompositeOverBg(ViewerState* s, const Frame& f) {
   }
 }
 
-// Advance one frame, composite it, and (re)arm the timer for its duration.
-void AdvanceFrame(ViewerState* s) {
-  Frame f;
-  if (!s->source || !s->source->NextFrame(f)) return;
+int FrameCountI(const ViewerState* s) {
+  return static_cast<int>((std::max)(static_cast<size_t>(1), s->frame_count));
+}
+
+void ShowFrame(ViewerState* s, const Frame& f) {
   CompositeOverBg(s, f);
   s->has_image = true;
   InvalidateRect(s->hwnd, nullptr, FALSE);
-  if (s->frame_count > 1) {
+}
+
+// Timer-driven advance to the next frame; re-arms unless paused.
+void AdvanceFrame(ViewerState* s) {
+  Frame f;
+  if (!s->source || !s->source->NextFrame(f)) return;
+  s->cur_index = (s->cur_index + 1) % FrameCountI(s);
+  ShowFrame(s, f);
+  if (!s->paused && s->frame_count > 1) {
     SetTimer(s->hwnd, kTimerId, static_cast<UINT>(std::max(kMinFrameMs, f.duration_ms)),
              nullptr);
+  }
+}
+
+void PausePlayback(ViewerState* s) {
+  s->paused = true;
+  KillTimer(s->hwnd, kTimerId);
+}
+
+void ResumePlayback(ViewerState* s) {
+  s->paused = false;
+  if (s->frame_count > 1) SetTimer(s->hwnd, kTimerId, 1, nullptr);  // next tick advances
+}
+
+void StepNext(ViewerState* s) {
+  PausePlayback(s);
+  Frame f;
+  if (!s->source || !s->source->NextFrame(f)) return;
+  s->cur_index = (s->cur_index + 1) % FrameCountI(s);
+  ShowFrame(s, f);
+}
+
+void StepPrev(ViewerState* s) {
+  PausePlayback(s);
+  if (!s->source) return;
+  const int fc = FrameCountI(s);
+  const int idx = (s->cur_index - 1 + fc) % fc;
+  Frame f;
+  if (s->source->SeekToFrame(static_cast<size_t>(idx), f)) {
+    s->cur_index = idx;
+    ShowFrame(s, f);
   }
 }
 
@@ -265,6 +314,8 @@ void LoadFromBytes(ViewerState* s, const uint8_t* data, size_t len) {
   s->canvas.cy = s->source->CanvasHeight();
   s->frame_count = s->source->FrameCount();
   s->offset = {0, 0};
+  s->paused = false;
+  s->cur_index = -1;
   AdvanceFrame(s);  // show first frame + arm timer if animated
   UpdateScrollbars(s);
 
@@ -289,6 +340,24 @@ void ClearImage(ViewerState* s) {
   s->composited.shrink_to_fit();
   s->source.reset();  // free decoder + canvases
   InvalidateRect(s->hwnd, nullptr, TRUE);
+}
+
+// Build the right-click playback menu (only for multi-frame images). The labels
+// are kept in ViewerState so the pointers stay valid after we return to Opus.
+DVPCONTEXTMENUITEM* BuildContextMenu(ViewerState* s, DWORD* pNum) {
+  if (s->frame_count <= 1) {
+    if (pNum) *pNum = 0;
+    return nullptr;
+  }
+  s->menu_labels[0] = s->paused ? L"Play" : L"Pause";
+  s->menu_labels[2] = L"Previous frame";
+  s->menu_labels[3] = L"Next frame";
+  s->menu_items[0] = {const_cast<LPWSTR>(s->menu_labels[0].c_str()), 0, CMD_PLAYPAUSE};
+  s->menu_items[1] = {nullptr, DVPCMF_SEPARATOR, 0};
+  s->menu_items[2] = {const_cast<LPWSTR>(s->menu_labels[2].c_str()), 0, CMD_PREV};
+  s->menu_items[3] = {const_cast<LPWSTR>(s->menu_labels[3].c_str()), 0, CMD_NEXT};
+  if (pNum) *pNum = 4;
+  return s->menu_items;
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -318,7 +387,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
 
     case DVPLUGINMSG_GETCAPABILITIES:
-      return VPCAPABILITY_RESIZE_FIT | VPCAPABILITY_RESIZE_ANY;
+      return VPCAPABILITY_RESIZE_FIT | VPCAPABILITY_RESIZE_ANY |
+             VPCAPABILITY_ADDCONTEXTMENU;
+
+    case DVPLUGINMSG_ADDCONTEXTMENU:
+      return reinterpret_cast<LRESULT>(
+          BuildContextMenu(s, reinterpret_cast<DWORD*>(wParam)));
+
+    case WM_COMMAND:
+      switch (LOWORD(wParam)) {
+        case CMD_PLAYPAUSE:
+          if (s->paused) ResumePlayback(s); else PausePlayback(s);
+          return 0;
+        case CMD_PREV: StepPrev(s); return 0;
+        case CMD_NEXT: StepNext(s); return 0;
+        default: break;
+      }
+      break;
+
+    case DVPLUGINMSG_APPCOMMAND:
+      switch (GET_APPCOMMAND_LPARAM(lParam)) {
+        case APPCOMMAND_MEDIA_NEXTTRACK: StepNext(s); return TRUE;
+        case APPCOMMAND_MEDIA_PREVIOUSTRACK: StepPrev(s); return TRUE;
+        case APPCOMMAND_MEDIA_PAUSE:
+        case APPCOMMAND_MEDIA_STOP: PausePlayback(s); return TRUE;
+        case APPCOMMAND_MEDIA_PLAY: ResumePlayback(s); return TRUE;
+        case APPCOMMAND_MEDIA_PLAY_PAUSE:
+          if (s->paused) ResumePlayback(s); else PausePlayback(s);
+          return TRUE;
+        default: break;
+      }
+      break;
 
     case DVPLUGINMSG_GETPICSIZE:
     case DVPLUGINMSG_GETORIGINALPICSIZE:

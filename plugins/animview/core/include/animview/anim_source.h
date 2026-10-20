@@ -32,6 +32,19 @@ class AnimSource {
   // Loops automatically. Returns false only if the source is not open.
   virtual bool NextFrame(Frame& out) = 0;
   virtual void Rewind() = 0;
+
+  // Seek to a 0-based frame by rewinding and decoding forward. O(index) but
+  // needs no per-format code (both players stream from the start). Used for
+  // "previous frame" stepping.
+  bool SeekToFrame(size_t index, Frame& out) {
+    Rewind();
+    bool ok = false;
+    for (size_t i = 0; i <= index; ++i) {
+      ok = NextFrame(out);
+      if (!ok) break;
+    }
+    return ok;
+  }
 };
 
 // Detect WebP vs GIF from the header and return an opened source, or nullptr if
