@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +33,14 @@ constexpr int kZoomMax = 1600;
 constexpr int kBarHeight = 40;
 constexpr int kBtnW = 36;
 constexpr int kHideDelayMs = 2500;
+// Bounded cache of decoded frames so backward steps / scrubs aren't O(N)
+// re-decodes. Capped, so it never reintroduces the old all-frames-resident OOM.
+constexpr size_t kCacheCapBytes = 192ull * 1024 * 1024;
+
+struct CachedFrame {
+  std::vector<uint8_t> bgra;
+  int duration_ms = 0;
+};
 
 // Context-menu command IDs (our File > animview submenu items).
 enum { CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3 };
@@ -57,6 +66,10 @@ struct ViewerState {
   // Playback.
   bool paused = false;
   int cur_index = -1;  // frame currently displayed (-1 = none yet)
+  int decoder_pos = 0;         // index the source's next NextFrame() will return
+  int last_duration_ms = 0;    // duration of the frame just shown
+  std::map<int, CachedFrame> cache;  // decoded frames (bounded by kCacheCapBytes)
+  size_t cache_bytes = 0;
   DVPCONTEXTMENUITEM menu_items[9]{};
   std::wstring menu_labels[9];
 
@@ -98,15 +111,75 @@ void ShowFrame(ViewerState* s, const Frame& f) {
   InvalidateRect(s->hwnd, nullptr, FALSE);
 }
 
+void CacheClear(ViewerState* s) {
+  s->cache.clear();
+  s->cache_bytes = 0;
+}
+
+void CachePut(ViewerState* s, int idx, const Frame& f) {
+  if (f.bgra.empty() || s->cache.count(idx)) return;
+  const size_t sz = f.bgra.size();
+  while (s->cache_bytes + sz > kCacheCapBytes && !s->cache.empty()) {
+    auto lo = s->cache.begin();
+    auto hi = std::prev(s->cache.end());
+    const int dlo = (lo->first > idx) ? lo->first - idx : idx - lo->first;
+    const int dhi = (hi->first > idx) ? hi->first - idx : idx - hi->first;
+    auto victim = (dlo >= dhi) ? lo : hi;  // drop whichever end is farther away
+    s->cache_bytes -= victim->second.bgra.size();
+    s->cache.erase(victim);
+  }
+  if (s->cache_bytes + sz > kCacheCapBytes) return;  // a single frame exceeds the cap
+  CachedFrame cf;
+  cf.bgra = f.bgra;
+  cf.duration_ms = f.duration_ms;
+  s->cache_bytes += sz;
+  s->cache.emplace(idx, std::move(cf));
+}
+
+bool CacheGet(ViewerState* s, int idx, Frame& out) {
+  auto it = s->cache.find(idx);
+  if (it == s->cache.end()) return false;
+  out.width = s->canvas.cx;
+  out.height = s->canvas.cy;
+  out.bgra = it->second.bgra;
+  out.duration_ms = it->second.duration_ms;
+  return true;
+}
+
+// Show frame `idx`, choosing the cheapest source: cache hit, one sequential
+// decode when it's exactly the decoder's next frame, else a (slower) seek.
+bool GotoFrame(ViewerState* s, int idx) {
+  if (!s->source) return false;
+  const int fc = FrameCountI(s);
+  idx = ((idx % fc) + fc) % fc;
+
+  Frame f;
+  if (CacheGet(s, idx, f)) {
+    s->cur_index = idx;
+    s->last_duration_ms = f.duration_ms;
+    ShowFrame(s, f);
+    return true;
+  }
+  if (idx == s->decoder_pos) {
+    if (!s->source->NextFrame(f)) return false;
+    s->decoder_pos = (s->decoder_pos + 1) % fc;
+  } else {
+    if (!s->source->SeekToFrame(static_cast<size_t>(idx), f)) return false;
+    s->decoder_pos = (idx + 1) % fc;
+  }
+  s->cur_index = idx;
+  s->last_duration_ms = f.duration_ms;
+  CachePut(s, idx, f);
+  ShowFrame(s, f);
+  return true;
+}
+
 // Timer-driven advance to the next frame; re-arms unless paused.
 void AdvanceFrame(ViewerState* s) {
-  Frame f;
-  if (!s->source || !s->source->NextFrame(f)) return;
-  s->cur_index = (s->cur_index + 1) % FrameCountI(s);
-  ShowFrame(s, f);
+  if (!GotoFrame(s, (s->cur_index + 1) % FrameCountI(s))) return;
   if (!s->paused && s->frame_count > 1) {
-    SetTimer(s->hwnd, kTimerId, static_cast<UINT>(std::max(kMinFrameMs, f.duration_ms)),
-             nullptr);
+    SetTimer(s->hwnd, kTimerId,
+             static_cast<UINT>(std::max(kMinFrameMs, s->last_duration_ms)), nullptr);
   }
 }
 
@@ -122,22 +195,12 @@ void ResumePlayback(ViewerState* s) {
 
 void StepNext(ViewerState* s) {
   PausePlayback(s);
-  Frame f;
-  if (!s->source || !s->source->NextFrame(f)) return;
-  s->cur_index = (s->cur_index + 1) % FrameCountI(s);
-  ShowFrame(s, f);
+  GotoFrame(s, (s->cur_index + 1) % FrameCountI(s));
 }
 
 void StepPrev(ViewerState* s) {
   PausePlayback(s);
-  if (!s->source) return;
-  const int fc = FrameCountI(s);
-  const int idx = (s->cur_index - 1 + fc) % fc;
-  Frame f;
-  if (s->source->SeekToFrame(static_cast<size_t>(idx), f)) {
-    s->cur_index = idx;
-    ShowFrame(s, f);
-  }
+  GotoFrame(s, (s->cur_index - 1 + FrameCountI(s)) % FrameCountI(s));
 }
 
 // Displayed image size for the current zoom + client size.
@@ -428,11 +491,7 @@ void SeekBarToX(ViewerState* s, int x, const RECT& track) {
   int idx = (fc > 1) ? (rel * (fc - 1) + w / 2) / w : 0;
   idx = (std::max)(0, (std::min)(fc - 1, idx));
   if (idx == s->cur_index) return;
-  Frame f;
-  if (s->source->SeekToFrame(static_cast<size_t>(idx), f)) {
-    s->cur_index = idx;
-    ShowFrame(s, f);
-  }
+  GotoFrame(s, idx);
 }
 
 void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
@@ -501,6 +560,9 @@ void LoadFromBytes(ViewerState* s, const uint8_t* data, size_t len) {
   s->offset = {0, 0};
   s->paused = false;
   s->cur_index = -1;
+  s->decoder_pos = 0;
+  s->last_duration_ms = 0;
+  CacheClear(s);
   AdvanceFrame(s);  // show first frame + arm timer if animated
   UpdateScrollbars(s);
 
@@ -523,6 +585,7 @@ void ClearImage(ViewerState* s) {
   s->has_image = false;
   s->composited.clear();
   s->composited.shrink_to_fit();
+  CacheClear(s);
   s->source.reset();  // free decoder + canvases
   InvalidateRect(s->hwnd, nullptr, TRUE);
 }
