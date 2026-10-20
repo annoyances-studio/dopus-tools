@@ -122,35 +122,44 @@ void ClampOffset(ViewerState* s, const RECT& client, const SIZE& disp) {
   s->offset.cy = (std::max)(0L, (std::min)(maxy, s->offset.cy));
 }
 
-// Sync the H/V scrollbars to the current zoom; they auto-hide when the image
-// fits (nPage > nMax). Guarded against the WM_SIZE re-entry a visibility change
-// can trigger.
+// Sync the H/V scrollbars to the current zoom. They auto-hide when the image
+// fits (nPage > nMax). Showing/hiding a bar changes the client size, which would
+// invalidate the range we just set — so we recompute until the client settles
+// (a few passes max). The guard swallows the synchronous WM_SIZE that
+// SetScrollInfo can fire, leaving this loop as the single authority.
 void UpdateScrollbars(ViewerState* s) {
   if (s->updating_scrollbars) return;
   s->updating_scrollbars = true;
 
-  RECT client;
-  GetClientRect(s->hwnd, &client);
-  SIZE disp;
-  Scrollable(s, client, &disp);
-  ClampOffset(s, client, disp);
+  for (int pass = 0; pass < 3; ++pass) {
+    RECT client;
+    GetClientRect(s->hwnd, &client);
+    SIZE disp;
+    Scrollable(s, client, &disp);
+    ClampOffset(s, client, disp);
 
-  SCROLLINFO si{};
-  si.cbSize = sizeof(si);
-  si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-  si.nMin = 0;
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
 
-  si.nMax = (disp.cx > 0) ? disp.cx - 1 : 0;
-  si.nPage = static_cast<UINT>(client.right - client.left);
-  si.nPos = s->offset.cx;
-  SetScrollInfo(s->hwnd, SB_HORZ, &si, TRUE);
+    si.nMax = (disp.cx > 0) ? disp.cx - 1 : 0;
+    si.nPage = static_cast<UINT>(client.right - client.left);
+    si.nPos = s->offset.cx;
+    SetScrollInfo(s->hwnd, SB_HORZ, &si, TRUE);
 
-  si.nMax = (disp.cy > 0) ? disp.cy - 1 : 0;
-  si.nPage = static_cast<UINT>(client.bottom - client.top);
-  si.nPos = s->offset.cy;
-  SetScrollInfo(s->hwnd, SB_VERT, &si, TRUE);
+    si.nMax = (disp.cy > 0) ? disp.cy - 1 : 0;
+    si.nPage = static_cast<UINT>(client.bottom - client.top);
+    si.nPos = s->offset.cy;
+    SetScrollInfo(s->hwnd, SB_VERT, &si, TRUE);
+
+    RECT after;
+    GetClientRect(s->hwnd, &after);
+    if (EqualRect(&after, &client)) break;  // bars settled
+  }
 
   s->updating_scrollbars = false;
+  InvalidateRect(s->hwnd, nullptr, FALSE);  // repaint whole client (clears artifacts)
 }
 
 void FillBitmapInfoTopDown(BITMAPINFO* bi, int w, int h) {
