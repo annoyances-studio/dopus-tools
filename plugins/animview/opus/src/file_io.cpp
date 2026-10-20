@@ -27,4 +27,29 @@ std::vector<uint8_t> ReadWholeFile(LPCWSTR path) {
   return bytes;
 }
 
+std::vector<uint8_t> ReadWholeStream(IStream* stream) {
+  std::vector<uint8_t> out;
+  if (stream == nullptr) return out;
+
+  LARGE_INTEGER zero{};
+  stream->Seek(zero, STREAM_SEEK_SET, nullptr);  // start from the beginning
+
+  constexpr size_t kChunk = 64 * 1024;
+  constexpr size_t kCap = 256ull * 1024 * 1024;  // 256 MB
+  size_t total = 0;
+  for (;;) {
+    out.resize(total + kChunk);
+    ULONG read = 0;
+    const HRESULT hr = stream->Read(out.data() + total, static_cast<ULONG>(kChunk), &read);
+    total += read;
+    if (total > kCap) {
+      out.clear();
+      return out;
+    }
+    if (read == 0 || (hr != S_OK && hr != S_FALSE)) break;
+  }
+  out.resize(total);
+  return out;
+}
+
 }  // namespace animview

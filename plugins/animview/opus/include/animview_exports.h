@@ -26,10 +26,16 @@ __declspec(dllexport) BOOL DVP_IdentifyFileBytes(HWND hWnd, LPTSTR lpszName,
                                                  LPVIEWERPLUGINFILEINFO lpVPFileInfo,
                                                  DWORD dwStreamFlags);
 
-// Still path (increment #2: decode + return the first frame as a bitmap).
+// Still path: decode + return the first frame as a bitmap (thumbnails / fallback).
 __declspec(dllexport) HBITMAP DVP_LoadBitmap(HWND hWnd, LPTSTR lpszName,
                                              LPVIEWERPLUGINFILEINFO lpVPFileInfo,
                                              LPSIZE lpszDesiredSize, HANDLE hAbortEvent);
+
+// Same, from a stream (archive members / already-open files).
+__declspec(dllexport) HBITMAP DVP_LoadBitmapStream(HWND hWnd, LPSTREAM lpStream,
+                                                   LPTSTR lpszName,
+                                                   LPVIEWERPLUGINFILEINFO lpVPFileInfo,
+                                                   LPSIZE lpszDesiredSize, DWORD dwStreamFlags);
 
 // Animated path (increment #3: the owned window + playback loop).
 __declspec(dllexport) HWND DVP_CreateViewer(HWND hWnd, LPRECT lpRc, DWORD dwFlags);

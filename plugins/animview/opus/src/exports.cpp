@@ -82,7 +82,10 @@ BOOL DVP_Identify(LPVIEWERPLUGININFO lpVPInfo) {
   // We identify by header bytes, and must override Opus's internal (still) WebP
   // handler for the animated files we claim. We deliberately do NOT claim still
   // WebP (see DVP_IdentifyFileBytes), so Opus keeps showing those itself.
-  lpVPInfo->dwFlags = DVPFIF_CanHandleBytes | DVPFIF_OverrideInternal;
+  // CanHandleStreams lets Opus offer us files it only has as a stream — e.g.
+  // members inside a zip/archive — which it identifies via DVP_IdentifyFileBytes.
+  lpVPInfo->dwFlags =
+      DVPFIF_CanHandleBytes | DVPFIF_CanHandleStreams | DVPFIF_OverrideInternal;
 
   // Version 0.1.0.0  (High = minor,major ; Low = revision,build)
   lpVPInfo->dwVersionHigh = MAKELPARAM(1, 0);
@@ -175,6 +178,23 @@ HBITMAP DVP_LoadBitmap(HWND hWnd, LPTSTR lpszName,
     lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
   }
 
+  return FrameToDIBSection(hWnd, frame);
+}
+
+HBITMAP DVP_LoadBitmapStream(HWND hWnd, LPSTREAM lpStream, LPTSTR /*lpszName*/,
+                             LPVIEWERPLUGINFILEINFO lpVPFileInfo,
+                             LPSIZE /*lpszDesiredSize*/, DWORD /*dwStreamFlags*/) {
+  const std::vector<uint8_t> bytes = animview::ReadWholeStream(lpStream);
+  if (bytes.empty()) return nullptr;
+
+  animview::Frame frame;
+  if (!animview::DecodeFirstFrame(bytes.data(), bytes.size(), frame)) return nullptr;
+
+  if (lpVPFileInfo != nullptr) {
+    lpVPFileInfo->szImageSize.cx = frame.width;
+    lpVPFileInfo->szImageSize.cy = frame.height;
+    lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
+  }
   return FrameToDIBSection(hWnd, frame);
 }
 

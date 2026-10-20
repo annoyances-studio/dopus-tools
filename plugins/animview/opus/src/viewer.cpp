@@ -6,6 +6,7 @@
 #include "viewer.h"
 
 #include <objidl.h>
+#include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 
 #include <algorithm>
 #include <cstdint>
@@ -43,6 +44,7 @@ struct ViewerState {
 
   // Pan / scroll (only meaningful when the displayed image exceeds the client).
   SIZE offset{0, 0};  // displayed-space pixels hidden off the top-left
+  bool hbar = false, vbar = false;  // which scrollbars we currently show
   bool updating_scrollbars = false;
   bool panning = false;
   POINT pan_anchor{0, 0};
@@ -171,44 +173,57 @@ void ClampOffset(ViewerState* s, const RECT& client, const SIZE& disp) {
   s->offset.cy = (std::max)(0L, (std::min)(maxy, s->offset.cy));
 }
 
-// Sync the H/V scrollbars to the current zoom. They auto-hide when the image
-// fits (nPage > nMax). Showing/hiding a bar changes the client size, which would
-// invalidate the range we just set — so we recompute until the client settles
-// (a few passes max). The guard swallows the synchronous WM_SIZE that
-// SetScrollInfo can fire, leaving this loop as the single authority.
+// Sync the H/V scrollbars to the current zoom. `GetClientRect` does not reflect
+// a bar's appearance synchronously, so instead of looping on it we RESERVE the
+// scrollbar thickness ourselves: derive the no-bars content box, decide which
+// bars are needed (two passes for the mutual dependency), show/hide them
+// explicitly, and set the page size from the reserved content box. Finally force
+// a full frame+client redraw to clear stale scrollbar/strip artifacts.
 void UpdateScrollbars(ViewerState* s) {
   if (s->updating_scrollbars) return;
   s->updating_scrollbars = true;
 
-  for (int pass = 0; pass < 3; ++pass) {
-    RECT client;
-    GetClientRect(s->hwnd, &client);
-    SIZE disp;
-    Scrollable(s, client, &disp);
-    ClampOffset(s, client, disp);
+  const int sxV = GetSystemMetrics(SM_CXVSCROLL);
+  const int syH = GetSystemMetrics(SM_CYHSCROLL);
 
-    SCROLLINFO si{};
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    si.nMin = 0;
+  RECT c;
+  GetClientRect(s->hwnd, &c);
+  // Content box as if no bars were shown (add back any currently shown).
+  const int fullW = (c.right - c.left) + (s->vbar ? sxV : 0);
+  const int fullH = (c.bottom - c.top) + (s->hbar ? syH : 0);
 
-    si.nMax = (disp.cx > 0) ? disp.cx - 1 : 0;
-    si.nPage = static_cast<UINT>(client.right - client.left);
-    si.nPos = s->offset.cx;
+  RECT fullRc{0, 0, fullW, fullH};
+  const SIZE disp = ComputeDisplayed(s, fullRc);  // fit mode fits this box -> no bars
+
+  bool needH = false, needV = false;
+  for (int i = 0; i < 2; ++i) {
+    needH = disp.cx > (fullW - (needV ? sxV : 0));
+    needV = disp.cy > (fullH - (needH ? syH : 0));
+  }
+  const int contentW = fullW - (needV ? sxV : 0);
+  const int contentH = fullH - (needH ? syH : 0);
+
+  if (needH != s->hbar) { ShowScrollBar(s->hwnd, SB_HORZ, needH); s->hbar = needH; }
+  if (needV != s->vbar) { ShowScrollBar(s->hwnd, SB_VERT, needV); s->vbar = needV; }
+
+  s->offset.cx = (std::max)(0L, (std::min)(static_cast<LONG>((std::max)(0, static_cast<int>(disp.cx) - contentW)), s->offset.cx));
+  s->offset.cy = (std::max)(0L, (std::min)(static_cast<LONG>((std::max)(0, static_cast<int>(disp.cy) - contentH)), s->offset.cy));
+
+  SCROLLINFO si{};
+  si.cbSize = sizeof(si);
+  si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+  si.nMin = 0;
+  if (needH) {
+    si.nMax = disp.cx - 1; si.nPage = static_cast<UINT>(contentW); si.nPos = s->offset.cx;
     SetScrollInfo(s->hwnd, SB_HORZ, &si, TRUE);
-
-    si.nMax = (disp.cy > 0) ? disp.cy - 1 : 0;
-    si.nPage = static_cast<UINT>(client.bottom - client.top);
-    si.nPos = s->offset.cy;
+  }
+  if (needV) {
+    si.nMax = disp.cy - 1; si.nPage = static_cast<UINT>(contentH); si.nPos = s->offset.cy;
     SetScrollInfo(s->hwnd, SB_VERT, &si, TRUE);
-
-    RECT after;
-    GetClientRect(s->hwnd, &after);
-    if (EqualRect(&after, &client)) break;  // bars settled
   }
 
   s->updating_scrollbars = false;
-  InvalidateRect(s->hwnd, nullptr, FALSE);  // repaint whole client (clears artifacts)
+  RedrawWindow(s->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
 }
 
 void FillBitmapInfoTopDown(BITMAPINFO* bi, int w, int h) {
@@ -271,33 +286,6 @@ void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
   if (oldBack) SelectObject(mem, oldBack);
   if (back) DeleteObject(back);
   if (mem) DeleteDC(mem);
-}
-
-// Read an entire IStream into memory (Opus hands the viewer a stream for the
-// preview pane and for files it already has open). Empty on failure.
-std::vector<uint8_t> ReadWholeStream(IStream* stream) {
-  std::vector<uint8_t> out;
-  if (stream == nullptr) return out;
-
-  LARGE_INTEGER zero{};
-  stream->Seek(zero, STREAM_SEEK_SET, nullptr);  // start from the beginning
-
-  constexpr size_t kChunk = 64 * 1024;
-  constexpr size_t kCap = 256ull * 1024 * 1024;  // 256 MB
-  size_t total = 0;
-  for (;;) {
-    out.resize(total + kChunk);
-    ULONG read = 0;
-    const HRESULT hr = stream->Read(out.data() + total, static_cast<ULONG>(kChunk), &read);
-    total += read;
-    if (total > kCap) {
-      out.clear();
-      return out;
-    }
-    if (read == 0 || (hr != S_OK && hr != S_FALSE)) break;
-  }
-  out.resize(total);
-  return out;
 }
 
 void LoadFromBytes(ViewerState* s, const uint8_t* data, size_t len) {
@@ -560,6 +548,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CAPTURECHANGED:
       s->panning = false;
       return 0;
+
+    case WM_CONTEXTMENU: {
+      // Our own popup for playback — reliable regardless of whether Opus surfaces
+      // the DVPLUGINMSG_ADDCONTEXTMENU items.
+      if (s->frame_count <= 1) break;  // nothing to control on a still
+      POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+      if (pt.x == -1 && pt.y == -1) {  // keyboard-invoked
+        RECT r;
+        GetClientRect(hWnd, &r);
+        pt.x = r.right / 2;
+        pt.y = r.bottom / 2;
+        ClientToScreen(hWnd, &pt);
+      }
+      HMENU menu = CreatePopupMenu();
+      if (menu) {
+        AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
+        AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
+        const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y,
+                                       0, hWnd, nullptr);
+        DestroyMenu(menu);
+        switch (cmd) {
+          case CMD_PLAYPAUSE:
+            if (s->paused) ResumePlayback(s); else PausePlayback(s);
+            break;
+          case CMD_PREV: StepPrev(s); break;
+          case CMD_NEXT: StepNext(s); break;
+          default: break;
+        }
+      }
+      return 0;
+    }
 
     case WM_ERASEBKGND:
       return 1;  // painted in WM_PAINT

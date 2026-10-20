@@ -5,6 +5,7 @@
 
 #pragma once
 #include <windows.h>
+#include <objidl.h>  // IStream
 
 #include <cstdint>
 #include <vector>
@@ -14,5 +15,9 @@ namespace animview {
 // Read a whole file into memory. Empty on failure. Capped so a pathological
 // file can't balloon memory (WebP stills/animations are comfortably under this).
 std::vector<uint8_t> ReadWholeFile(LPCWSTR path);
+
+// Read an entire IStream into memory (Opus hands streams for archive members and
+// files it already holds open). Empty on failure.
+std::vector<uint8_t> ReadWholeStream(IStream* stream);
 
 }  // namespace animview
