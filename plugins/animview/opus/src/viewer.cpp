@@ -29,17 +29,8 @@ constexpr int kMinFrameMs = 10;
 constexpr int kZoomMin = 1;
 constexpr int kZoomMax = 1600;
 
-// Context-menu / popup command IDs.
-enum {
-  CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3,
-  CMD_ZOOMIN = 4, CMD_ZOOMOUT = 5, CMD_FIT = 6, CMD_ACTUAL = 7,
-};
-
-// Remembered USER zoom, kept across viewer instances so it doesn't reset per
-// image. g_have_user_zoom stays false until the user actually changes zoom, so the
-// very first image still uses Opus's initial zoom.
-int g_last_zoom = ZOOM_FITPAGE;
-bool g_have_user_zoom = false;
+// Context-menu command IDs (our File > animview submenu items).
+enum { CMD_PLAYPAUSE = 1, CMD_PREV = 2, CMD_NEXT = 3 };
 
 struct ViewerState {
   HWND hwnd = nullptr;
@@ -161,12 +152,6 @@ SIZE ComputeDisplayed(const ViewerState* s, const RECT& client) {
   return out;
 }
 
-int EffectivePercent(const ViewerState* s, const RECT& client) {
-  const SIZE d = ComputeDisplayed(s, client);
-  if (s->canvas.cx <= 0) return 100;
-  return (std::max)(1, static_cast<int>(static_cast<long long>(d.cx) * 100 / s->canvas.cx));
-}
-
 bool Scrollable(const ViewerState* s, const RECT& client, SIZE* dispOut = nullptr) {
   const SIZE d = ComputeDisplayed(s, client);
   if (dispOut) *dispOut = d;
@@ -253,25 +238,6 @@ void SendSizeChange(ViewerState* s, const RECT& client) {
   n.hdr.code = DVPN_SIZECHANGE;
   n.szSize = ComputeDisplayed(s, client);
   SendMessageW(GetParent(s->hwnd), WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&n));
-}
-
-// Apply a zoom request (ZOOM_FITPAGE / ZOOM_ORIGINAL / percent), remember it, and
-// refresh. Used by our popup's zoom items.
-void SetZoomReq(ViewerState* s, int req) {
-  s->zoom_req = req;
-  g_last_zoom = req;
-  g_have_user_zoom = true;  // user chose this; keep it across images
-  s->offset = {0, 0};
-  UpdateScrollbars(s);
-  RECT client;
-  if (GetClientRect(s->hwnd, &client)) SendSizeChange(s, client);
-  InvalidateRect(s->hwnd, nullptr, FALSE);
-}
-
-int CurrentPercent(ViewerState* s) {
-  RECT c;
-  GetClientRect(s->hwnd, &c);
-  return EffectivePercent(s, c);
 }
 
 void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
@@ -371,17 +337,16 @@ DVPCONTEXTMENUITEM* BuildContextMenu(ViewerState* s, DWORD* pNum) {
     ++n;
   };
 
-  add(L"animview", DVPCMF_BEGINSUBMENU, 0);  // submenu header
-  if (s->frame_count > 1) {
-    add(s->paused ? L"Play" : L"Pause", 0, CMD_PLAYPAUSE);
-    add(L"Previous frame", 0, CMD_PREV);
-    add(L"Next frame", 0, CMD_NEXT);
-    add(nullptr, DVPCMF_SEPARATOR, 0);
+  // Playback only — zoom is Opus's job (we honour its zoom mode). Nothing to add
+  // for a still image.
+  if (s->frame_count <= 1) {
+    if (pNum) *pNum = 0;
+    return nullptr;
   }
-  add(L"Zoom in", 0, CMD_ZOOMIN);
-  add(L"Zoom out", 0, CMD_ZOOMOUT);
-  add(L"Fit to window", 0, CMD_FIT);
-  add(L"Actual size (100%)", DVPCMF_ENDSUBMENU, CMD_ACTUAL);  // closes the submenu
+  add(L"animview", DVPCMF_BEGINSUBMENU, 0);  // submenu header
+  add(s->paused ? L"Play" : L"Pause", 0, CMD_PLAYPAUSE);
+  add(L"Previous frame", 0, CMD_PREV);
+  add(L"Next frame", DVPCMF_ENDSUBMENU, CMD_NEXT);  // closes the submenu
 
   if (pNum) *pNum = static_cast<DWORD>(n);
   return s->menu_items;
@@ -391,7 +356,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_CREATE) {
     auto* s = new ViewerState();
     s->hwnd = hWnd;
-    s->zoom_req = g_have_user_zoom ? g_last_zoom : ZOOM_FITPAGE;  // keep user's zoom
+    s->zoom_req = ZOOM_FITPAGE;  // default until Opus sends its zoom
     SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
     return 0;
   }
@@ -429,18 +394,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case CMD_PREV: StepPrev(s); return 0;
         case CMD_NEXT: StepNext(s); return 0;
-        case CMD_ZOOMIN: {
-          const int p = CurrentPercent(s);
-          SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
-          return 0;
-        }
-        case CMD_ZOOMOUT: {
-          const int p = CurrentPercent(s);
-          SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
-          return 0;
-        }
-        case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); return 0;
-        case CMD_ACTUAL: SetZoomReq(s, 100); return 0;
         default: break;
       }
       break;
@@ -465,23 +418,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (lParam) *reinterpret_cast<LPSIZE>(lParam) = s->canvas;
       return TRUE;
 
-    case DVPLUGINMSG_SETZOOM: {
-      // Opus's per-image INITIAL zoom. Once the user has chosen a zoom, keep
-      // theirs (Opus otherwise resets every image to its default, e.g. 100%).
-      s->zoom_req = g_have_user_zoom ? g_last_zoom : static_cast<int>(wParam);
-      s->offset = {0, 0};
-      UpdateScrollbars(s);
-      RECT client;
-      if (GetClientRect(hWnd, &client)) SendSizeChange(s, client);
-      InvalidateRect(hWnd, nullptr, FALSE);
-      return 0;
-    }
-
+    case DVPLUGINMSG_SETZOOM:
     case DVPLUGINMSG_ZOOM: {
-      // A user zoom action (toolbar / wheel) — honour and remember it.
+      // Honour Opus's zoom factor verbatim (like the OG), so WebP/GIF follow the
+      // same zoom mode as other image plugins. Keep the mode sentinels intact:
+      // ZOOM_FITPAGE (-1) and ZOOM_ORIGINAL (0).
       s->zoom_req = static_cast<int>(wParam);
-      g_last_zoom = s->zoom_req;
-      g_have_user_zoom = true;
       s->offset = {0, 0};
       UpdateScrollbars(s);
       RECT client;
@@ -490,11 +432,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     }
 
-    case DVPLUGINMSG_GETZOOMFACTOR: {
-      RECT client{};
-      GetClientRect(hWnd, &client);
-      return EffectivePercent(s, client);
-    }
+    case DVPLUGINMSG_GETZOOMFACTOR:
+      // Return the RAW factor, not a computed percent — otherwise Opus loses the
+      // fit/original MODE (it showed "100%" instead of "FIT" and reset each image).
+      return s->zoom_req;
 
     case DVPLUGINMSG_GETZOOMLIMITS:
       return (static_cast<LRESULT>(kZoomMax) << 16) | kZoomMin;
@@ -615,54 +556,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CAPTURECHANGED:
       s->panning = false;
       return 0;
-
-    case WM_CONTEXTMENU: {
-      // Right-click popup — the natural position. Opus only puts our
-      // ADDCONTEXTMENU items in its File menu, not here, so we show our own.
-      if (!s->has_image) break;
-      POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-      if (pt.x == -1 && pt.y == -1) {  // keyboard-invoked
-        RECT r;
-        GetClientRect(hWnd, &r);
-        pt.x = r.right / 2;
-        pt.y = r.bottom / 2;
-        ClientToScreen(hWnd, &pt);
-      }
-      HMENU menu = CreatePopupMenu();
-      if (menu) {
-        if (s->frame_count > 1) {
-          AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
-          AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
-          AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
-          AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        }
-        AppendMenuW(menu, MF_STRING, CMD_ZOOMIN, L"Zoom in");
-        AppendMenuW(menu, MF_STRING, CMD_ZOOMOUT, L"Zoom out");
-        AppendMenuW(menu, MF_STRING, CMD_FIT, L"Fit to window");
-        AppendMenuW(menu, MF_STRING, CMD_ACTUAL, L"Actual size (100%)");
-        const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y,
-                                       0, hWnd, nullptr);
-        DestroyMenu(menu);
-        const int p = CurrentPercent(s);
-        switch (cmd) {
-          case CMD_PLAYPAUSE:
-            if (s->paused) ResumePlayback(s); else PausePlayback(s);
-            break;
-          case CMD_PREV: StepPrev(s); break;
-          case CMD_NEXT: StepNext(s); break;
-          case CMD_ZOOMIN:
-            SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
-            break;
-          case CMD_ZOOMOUT:
-            SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
-            break;
-          case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); break;
-          case CMD_ACTUAL: SetZoomReq(s, 100); break;
-          default: break;
-        }
-      }
-      return 0;
-    }
 
     case WM_ERASEBKGND:
       return 1;  // painted in WM_PAINT
