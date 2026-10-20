@@ -45,3 +45,10 @@ libwebp notice.
 ## License
 
 MPL-2.0 — see [`LICENSE`](LICENSE). Per-plugin third-party notices live beside each plugin.
+
+## AI assistance
+
+dopus-tools is developed openly with the help of Claude (Anthropic). We state this plainly: commits Claude
+helped write carry a `Co-Authored-By: Claude` trailer. The code and design are open source so the work can be
+inspected, reused, and given back. If you'd rather not use AI-assisted software, that's a fair call — this
+disclosure is here so you can make it.
