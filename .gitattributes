@@ -1,0 +1,12 @@
+# Normalise line endings: LF in the repo, native on checkout.
+* text=auto eol=lf
+
+# Windows-native formats keep CRLF.
+*.vbs  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.sln  text eol=crlf
+*.vcxproj text eol=crlf
+
+# Don't touch the verbatim license text.
+LICENSE -text
