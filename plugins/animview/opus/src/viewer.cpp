@@ -616,6 +616,54 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       s->panning = false;
       return 0;
 
+    case WM_CONTEXTMENU: {
+      // Right-click popup — the natural position. Opus only puts our
+      // ADDCONTEXTMENU items in its File menu, not here, so we show our own.
+      if (!s->has_image) break;
+      POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+      if (pt.x == -1 && pt.y == -1) {  // keyboard-invoked
+        RECT r;
+        GetClientRect(hWnd, &r);
+        pt.x = r.right / 2;
+        pt.y = r.bottom / 2;
+        ClientToScreen(hWnd, &pt);
+      }
+      HMENU menu = CreatePopupMenu();
+      if (menu) {
+        if (s->frame_count > 1) {
+          AppendMenuW(menu, MF_STRING, CMD_PLAYPAUSE, s->paused ? L"Play" : L"Pause");
+          AppendMenuW(menu, MF_STRING, CMD_PREV, L"Previous frame");
+          AppendMenuW(menu, MF_STRING, CMD_NEXT, L"Next frame");
+          AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        AppendMenuW(menu, MF_STRING, CMD_ZOOMIN, L"Zoom in");
+        AppendMenuW(menu, MF_STRING, CMD_ZOOMOUT, L"Zoom out");
+        AppendMenuW(menu, MF_STRING, CMD_FIT, L"Fit to window");
+        AppendMenuW(menu, MF_STRING, CMD_ACTUAL, L"Actual size (100%)");
+        const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y,
+                                       0, hWnd, nullptr);
+        DestroyMenu(menu);
+        const int p = CurrentPercent(s);
+        switch (cmd) {
+          case CMD_PLAYPAUSE:
+            if (s->paused) ResumePlayback(s); else PausePlayback(s);
+            break;
+          case CMD_PREV: StepPrev(s); break;
+          case CMD_NEXT: StepNext(s); break;
+          case CMD_ZOOMIN:
+            SetZoomReq(s, (std::min)(kZoomMax, (std::max)(p + 1, p * 5 / 4)));
+            break;
+          case CMD_ZOOMOUT:
+            SetZoomReq(s, (std::max)(kZoomMin, p * 4 / 5));
+            break;
+          case CMD_FIT: SetZoomReq(s, ZOOM_FITPAGE); break;
+          case CMD_ACTUAL: SetZoomReq(s, 100); break;
+          default: break;
+        }
+      }
+      return 0;
+    }
+
     case WM_ERASEBKGND:
       return 1;  // painted in WM_PAINT
 
