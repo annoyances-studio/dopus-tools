@@ -64,6 +64,7 @@ struct ViewerState {
   bool bar_visible = false;
   bool mouse_tracking = false;  // TrackMouseEvent armed (for WM_MOUSELEAVE)
   bool scrubbing = false;       // dragging the progress bar
+  int scrub_x = 0;              // cursor x while scrubbing (for a smooth thumb)
 };
 
 ViewerState* GetState(HWND hWnd) {
@@ -351,7 +352,11 @@ void DrawBar(ViewerState* s, HDC hdc, const BarLayout& b) {
   const int tw = b.track.right - b.track.left;
   const int fc = static_cast<int>((std::max)(static_cast<size_t>(1), s->frame_count));
   const double frac = (fc > 1 && s->cur_index >= 0) ? static_cast<double>(s->cur_index) / (fc - 1) : 0.0;
-  const int thumbX = b.track.left + static_cast<int>(frac * tw + 0.5);
+  const int thumbX =
+      s->scrubbing
+          ? (std::max)(static_cast<int>(b.track.left),
+                       (std::min)(static_cast<int>(b.track.right), s->scrub_x))
+          : b.track.left + static_cast<int>(frac * tw + 0.5);
   for (int dy = -1; dy <= 1; ++dy) {  // 3px line via rects (no pen juggling)
     FillRC(hdc, b.track.left, ty + dy, b.track.right, ty + dy + 1, RGB(90, 90, 96));
     FillRC(hdc, b.track.left, ty + dy, thumbX, ty + dy + 1, accent);
@@ -391,9 +396,24 @@ void ShowBar(ViewerState* s) {
   if (!was) InvalidateBar(s);
 }
 
+bool CursorOverBar(ViewerState* s) {
+  POINT p;
+  if (!GetCursorPos(&p)) return false;
+  ScreenToClient(s->hwnd, &p);
+  RECT client;
+  GetClientRect(s->hwnd, &client);
+  const BarLayout b = ComputeBar(s, client);
+  return b.valid && PtInRect(&b.bar, p);
+}
+
 void HideBar(ViewerState* s) {
+  // Don't hide while the pointer is resting on the bar (so buttons stay aimable).
+  if (s->scrubbing || CursorOverBar(s)) {
+    SetTimer(s->hwnd, kHideTimerId, kHideDelayMs, nullptr);
+    return;
+  }
   KillTimer(s->hwnd, kHideTimerId);
-  if (s->bar_visible && !s->scrubbing) {
+  if (s->bar_visible) {
     s->bar_visible = false;
     InvalidateBar(s);
   }
@@ -714,6 +734,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (PtInRect(&b.next, pt)) { StepNext(s); return 0; }
           if (PtInRect(&b.track, pt)) {
             s->scrubbing = true;
+            s->scrub_x = mx;
             PausePlayback(s);
             SetCapture(hWnd);
             SeekBarToX(s, mx, b.track);
@@ -744,10 +765,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         s->mouse_tracking = true;
       }
       if (s->scrubbing) {
+        if (!(wParam & MK_LBUTTON)) {  // button released outside our notice
+          s->scrubbing = false;
+          ReleaseCapture();
+          return 0;
+        }
+        s->scrub_x = mx;
         RECT client;
         GetClientRect(hWnd, &client);
         const BarLayout b = ComputeBar(s, client);
-        if (b.valid) SeekBarToX(s, mx, b.track);
+        if (b.valid) {
+          SeekBarToX(s, mx, b.track);
+          InvalidateRect(hWnd, &b.bar, FALSE);  // move the thumb even within a frame
+        }
         return 0;
       }
       if (s->panning) {
