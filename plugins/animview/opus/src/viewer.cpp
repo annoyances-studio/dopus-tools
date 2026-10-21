@@ -78,6 +78,11 @@ struct ViewerState {
   bool mouse_tracking = false;  // TrackMouseEvent armed (for WM_MOUSELEAVE)
   bool scrubbing = false;       // dragging the progress bar
   int scrub_x = 0;              // cursor x while scrubbing (for a smooth thumb)
+
+  // Persistent double-buffer (avoids a full-screen DIBSection alloc every frame).
+  HBITMAP back_bmp = nullptr;
+  void* back_bits = nullptr;
+  int back_w = 0, back_h = 0;
 };
 
 ViewerState* GetState(HWND hWnd) {
@@ -186,6 +191,7 @@ void AdvanceFrame(ViewerState* s) {
 void PausePlayback(ViewerState* s) {
   s->paused = true;
   KillTimer(s->hwnd, kTimerId);
+  InvalidateRect(s->hwnd, nullptr, FALSE);  // redraw the held frame crisp (HALFTONE)
 }
 
 void ResumePlayback(ViewerState* s) {
@@ -494,19 +500,29 @@ void SeekBarToX(ViewerState* s, int x, const RECT& track) {
   GotoFrame(s, idx);
 }
 
+// Keep one client-sized top-down DIBSection back-buffer; recreate only on resize.
+void EnsureBackBuffer(ViewerState* s, HDC hdc, int w, int h) {
+  if (s->back_bmp && s->back_w == w && s->back_h == h) return;
+  if (s->back_bmp) {
+    DeleteObject(s->back_bmp);
+    s->back_bmp = nullptr;
+    s->back_bits = nullptr;
+  }
+  BITMAPINFO bi;
+  FillBitmapInfoTopDown(&bi, (std::max)(1, w), (std::max)(1, h));
+  s->back_bmp = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &s->back_bits, nullptr, 0);
+  s->back_w = w;
+  s->back_h = h;
+}
+
 void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
   const int cw = client.right - client.left;
   const int ch = client.bottom - client.top;
 
-  // Double buffer into a client-sized top-down DIBSection (no DDB).
-  BITMAPINFO bi;
-  FillBitmapInfoTopDown(&bi, cw, (std::max)(1, ch));
-  void* bits = nullptr;
+  EnsureBackBuffer(s, hdc, cw, ch);  // persistent — no per-frame alloc
   HDC mem = CreateCompatibleDC(hdc);
-  HBITMAP back = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  HGDIOBJ oldBack = back ? SelectObject(mem, back) : nullptr;
-
-  HDC target = (mem && back) ? mem : hdc;  // fall back to direct paint
+  HGDIOBJ oldBack = (mem && s->back_bmp) ? SelectObject(mem, s->back_bmp) : nullptr;
+  HDC target = (mem && s->back_bmp) ? mem : hdc;  // fall back to direct paint
 
   HBRUSH bgBrush = CreateSolidBrush(s->bg);
   RECT fillRc{0, 0, cw, ch};
@@ -521,7 +537,11 @@ void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
 
     BITMAPINFO src;
     FillBitmapInfoTopDown(&src, s->canvas.cx, s->canvas.cy);
-    SetStretchBltMode(target, HALFTONE);
+    // HALFTONE is crisp but expensive; use it only when still/paused. While an
+    // animation plays, COLORONCOLOR keeps the per-frame paint cheap enough that
+    // full screen doesn't saturate the UI thread.
+    const int mode = (s->paused || s->frame_count <= 1) ? HALFTONE : COLORONCOLOR;
+    SetStretchBltMode(target, mode);
     SetBrushOrgEx(target, 0, 0, nullptr);
     StretchDIBits(target, x, y, disp.cx, disp.cy, 0, 0, s->canvas.cx, s->canvas.cy,
                   s->composited.data(), &src, DIB_RGB_COLORS, SRCCOPY);
@@ -537,8 +557,8 @@ void PaintViewer(ViewerState* s, HDC hdc, const RECT& client) {
   }
 
   if (oldBack) SelectObject(mem, oldBack);
-  if (back) DeleteObject(back);
   if (mem) DeleteDC(mem);
+  // back_bmp is kept for next time; freed on resize (EnsureBackBuffer) / destroy.
 }
 
 void LoadFromBytes(ViewerState* s, const uint8_t* data, size_t len) {
@@ -899,6 +919,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_NCDESTROY:
       KillTimer(hWnd, kTimerId);
+      KillTimer(hWnd, kHideTimerId);
+      if (s->back_bmp) DeleteObject(s->back_bmp);
       delete s;
       SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
       return 0;
