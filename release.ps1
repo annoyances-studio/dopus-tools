@@ -92,12 +92,14 @@ $release = Invoke-RestMethod -Method Post -Uri "$ApiBase/repos/$Owner/$Repo/rele
 Write-Host "  $($release.html_url)"
 
 # ---- Upload assets ----------------------------------------------------------
-# GitHub returns upload_url as a URI template ".../assets{?name,label}"; strip the template.
-$uploadBase = $release.upload_url -replace '\{\?.*\}$', ''
+# Build the upload URL from the release id + the GitHub upload host (uploads.github.com,
+# distinct from api.github.com). Avoids parsing the templated upload_url.
+# (GitLab/Forgejo use a different asset-upload flow - see the settings block.)
 function Publish-Asset([string]$Path, [string]$ContentType) {
   $fname = Split-Path -Leaf $Path
+  $uploadUrl = "https://uploads.github.com/repos/$Owner/$Repo/releases/$($release.id)/assets?name=$fname"
   Write-Host "Uploading $fname..." -ForegroundColor Cyan
-  Invoke-RestMethod -Method Post -Uri "$uploadBase?name=$fname" -Headers $Headers `
+  Invoke-RestMethod -Method Post -Uri $uploadUrl -Headers $Headers `
     -InFile $Path -ContentType $ContentType | Out-Null
 }
 Publish-Asset $dll 'application/octet-stream'
