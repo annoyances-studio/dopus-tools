@@ -65,19 +65,26 @@ function naturalCompare(a, b) {
     return aa.length - bb.length;
 }
 
+// Return the folder's image Items, natural-sorted by name. We keep the Items from
+// the directory scan (they already carry full info) so the slideshow never has to
+// re-stat each file — that per-file GetItem was the slow part on big folders.
 function imagesInFolder(path) {
-    var names = [];
+    var pairs = [];
     try {
         var fe = DOpus.FSUtil.ReadDir(path);  // shallow
         while (fe && !fe.complete) {
             var fi = fe.next();
-            if (fi && !fi.is_dir && isImage(String(fi.name))) names.push(String(fi.name));
+            if (fi && !fi.is_dir && isImage(String(fi.name))) {
+                pairs.push({ item: fi, name: String(fi.name) });  // read name once
+            }
         }
     } catch (e) {
         DOpus.Output("SortedSlideshow: cannot read " + path + " (" + e + ")");
     }
-    names.sort(naturalCompare);
-    return names;
+    pairs.sort(function (a, b) { return naturalCompare(a.name, b.name); });
+    var items = [];
+    for (var i = 0; i < pairs.length; i++) items.push(pairs[i].item);
+    return items;
 }
 
 function OnSortedSlideshow(scriptCmdData) {
@@ -94,30 +101,26 @@ function OnSortedSlideshow(scriptCmdData) {
     }
     sel.sort(function (x, y) { return naturalCompare(String(x.name), String(y.name)); });
 
-    // Expand to the final ordered file list.
-    var list = [];
+    // Expand to the final ordered list of Items (each folder's images inline).
+    var ordered = [];
     for (var i = 0; i < sel.length; i++) {
         if (sel[i].is_dir) {
-            var base = String(sel[i].realpath);
-            var names = imagesInFolder(base);
-            for (var j = 0; j < names.length; j++) {
-                list.push(base + "\\" + names[j]);
-            }
+            var items = imagesInFolder(String(sel[i].realpath));
+            for (var j = 0; j < items.length; j++) ordered.push(items[j]);
         } else {
-            list.push(String(sel[i].realpath));
+            ordered.push(sel[i]);  // loose selected image — already an Item
         }
     }
 
-    if (list.length === 0) {
+    if (ordered.length === 0) {
         DOpus.Output("SortedSlideshow: no images in the selection.");
         return;
     }
 
-    // Hand the explicit order to Show SLIDESHOW.
+    // Hand the explicit order to the viewer. The Items come straight from the scan /
+    // selection, so there's no per-file re-stat. FULLSCREEN opens it full-screen.
     var cmd = func.command;
     cmd.ClearFiles();
-    for (var k = 0; k < list.length; k++) {
-        cmd.AddFile(DOpus.FSUtil.GetItem(list[k]));
-    }
-    cmd.RunCommand("Show SLIDESHOW");
+    for (var k = 0; k < ordered.length; k++) cmd.AddFile(ordered[k]);
+    cmd.RunCommand("Show SLIDESHOW FULLSCREEN");
 }
