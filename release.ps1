@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build the animview DLL and publish a release via the forge's REST API — no vendor
+  Build the animview DLL and publish a release via the forge's REST API - no vendor
   CLI (gh/glab). Just HTTP, so it ports across forges by editing the settings block.
 
 .DESCRIPTION
@@ -10,10 +10,11 @@
 .EXAMPLE
   # token from 1Password (fine-grained PAT, Contents: write on this repo)
   $env:RELEASE_TOKEN = op read "op://Private/dopus-tools release/token"
-  ./release.ps1 -Tag v0.1.0 -Notes "Animated WebP + GIF viewer for Directory Opus."
+  ./release.ps1 -Tag v0.1.1 -Notes "Animated WebP + GIF viewer for Directory Opus."
 
 .NOTES
   -SkipBuild uses the DLL already under out/build/x64-release. Needs Visual Studio to build.
+  ASCII-only on purpose: PowerShell 5.1 mis-reads UTF-8-without-BOM punctuation.
 #>
 param(
   [Parameter(Mandatory)][string]$Tag,
@@ -29,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12  # PS 5.1 needs this for TLS 1.2
 
 # ============================================================================
-#  Forge settings — THIS is the only block that changes to target another forge.
+#  Forge settings - THIS is the only block that changes to target another forge.
 # ============================================================================
 $ApiBase = 'https://api.github.com'
 $Owner   = 'annoyances-studio'
@@ -41,15 +42,13 @@ $Headers = @{
 }
 # GitLab:   $ApiBase='https://gitlab.com/api/v4'; address the project by URL-encoded
 #           'group%2Frepo'; auth header is  'PRIVATE-TOKEN' = <PAT>  (not Bearer); and
-#           assets are uploaded to /uploads first, then linked on the release (a bit
-#           more work than GitHub's single upload_url).
+#           assets upload to /uploads first, then get linked on the release.
 # Forgejo/Gitea: $ApiBase='https://your.forge/api/v1'; auth 'Authorization' = "token <PAT>";
 #           release create + asset upload endpoints mirror GitHub closely.
 # ============================================================================
 
 if (-not $env:RELEASE_TOKEN) {
-  throw "Set `$env:RELEASE_TOKEN first (fine-grained PAT with Contents: write). " +
-        "e.g.  `$env:RELEASE_TOKEN = op read 'op://Private/dopus-tools release/token'"
+  throw "Set env:RELEASE_TOKEN first (fine-grained PAT with Contents: write). e.g. `$env:RELEASE_TOKEN = op read 'op://Private/dopus-tools release/token'"
 }
 
 $root      = $PSScriptRoot
@@ -61,7 +60,7 @@ $notice    = Join-Path $pluginDir 'THIRD-PARTY.md'
 if (-not $SkipBuild) {
   Write-Host "Building x64 Release..." -ForegroundColor Cyan
   $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-  if (-not (Test-Path $vsw)) { throw "vswhere not found — is Visual Studio installed?" }
+  if (-not (Test-Path $vsw)) { throw "vswhere not found. Is Visual Studio installed?" }
   $vsPath = & $vsw -latest -property installationPath
   Import-Module (Join-Path $vsPath 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
   Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation `
@@ -72,13 +71,13 @@ if (-not $SkipBuild) {
     cmake --build --preset x64-release
   } finally { Pop-Location }
 }
-if (-not (Test-Path $dll)) { throw "DLL not found at $dll — build it, or drop -SkipBuild." }
+if (-not (Test-Path $dll)) { throw "DLL not found at $dll. Build it, or drop -SkipBuild." }
 
 # ---- Notes / name -----------------------------------------------------------
 if ($NotesFile) { $Notes = Get-Content -Raw $NotesFile }
 if (-not $Name) { $Name = "animview $Tag" }
 
-# ---- Create the release (creates the tag at main if it doesn't exist) -------
+# ---- Create the release (creates the tag at main if it does not exist) ------
 Write-Host "Creating release $Tag on $Owner/$Repo..." -ForegroundColor Cyan
 $payload = @{
   tag_name         = $Tag
