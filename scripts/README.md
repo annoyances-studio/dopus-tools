@@ -13,7 +13,8 @@ stays in keeping with the rest of the lab.
 | File | Type | What it does |
 |---|---|---|
 | [`photo-date-folders.rename.vbs`](photo-date-folders.rename.vbs) | Rename (`OnGetNewName`) | Sorts photos/videos into `YYYY-MM-DD\` folders. Date priority: **metadata** (date-taken / release-date) → **date embedded in the filename** (`YYYYMMDD_`, strips `IMG_`/`PXL_`) → the **older of file created/modified** → **today** (last resort). Perfect for a fast phone-photo dump. |
-| [`sorted-slideshow.js`](sorted-slideshow.js) | Command (`SortedSlideshow`) | Slideshow the selected folders' images in **natural, numeric-aware order** (`2` before `10`; `1.jpg`/`001.jpg` deterministic). Fixes the cold-selection case where Opus uses the filesystem's enumeration order — unsorted on **exFAT** (no sorted directory index, unlike NTFS). |
+| [`sorted-slideshow.js`](sorted-slideshow.js) | Command (`SortedSlideshow`) | Slideshow the selected folders' images in **natural, numeric-aware order** (`2` before `10`; `1.jpg`/`001.jpg` deterministic), full-screen. Fixes the cold-selection case where Opus uses the filesystem's enumeration order — unsorted on **exFAT** (no sorted directory index, unlike NTFS). |
+| [`folder-file-count.js`](folder-file-count.js) | Column (`Files`) + command (`ClearFolderCountCache`) | Per-folder **file count**, **cached** so it survives navigation (Opus's native count is recomputed on every folder re-read, so it's lost when you open a folder in the same lister). Keyed by path + folder mtime; persisted to `%LOCALAPPDATA%\dopus-tools`. Sort by it to find the non-empty ones among tens of thousands. |
 
 ## DOpus scripting gotchas learned (so we don't relearn them)
 
@@ -28,10 +29,6 @@ stays in keeping with the rest of the lab.
 
 - **"Real Type" script column** — read each file's first bytes, show its *actual* type (magic-byte detection);
   the one-click answer to identifying recovered GUID-named blobs.
-- **Cached file-count column** — persist per-folder file counts (keyed by path + mtime) so navigating in/out
-  doesn't throw away a count of thousands of subfolders; recompute only when the folder actually changed. The
-  real target: scanning ~50k folders on exFAT to find the ones that actually have files. (The underlying slowness
-  is the exFAT/NTFS scan cost, not Opus — caching is what makes it usable.)
 
 ## Native plugins
 
