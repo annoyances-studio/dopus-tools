@@ -63,24 +63,19 @@ function mtimeToken(item) {
 }
 
 function countFiles(path) {
-    // FSO's Files.Count returns the number directly, without building a DOpus Item
-    // per entry. Fall back to DOpus ReadDir on failure (FSO chokes on >260-char
-    // paths and some unicode; ReadDir handles them).
+    // DOpus's native ReadDir, not FSO.Files.Count: FSO is slower on big/exFAT dirs
+    // and chokes on long/unicode paths.
+    var n = 0;
     try {
-        return getFso().GetFolder(path).Files.Count;
-    } catch (e) {
-        try {
-            var n = 0;
-            var fe = DOpus.FSUtil.ReadDir(path);
-            while (fe && !fe.complete) {
-                var fi = fe.next();
-                if (fi && !fi.is_dir) n++;
-            }
-            return n;
-        } catch (e2) {
-            return -1;  // unreadable
+        var fe = DOpus.FSUtil.ReadDir(path);  // shallow
+        while (fe && !fe.complete) {
+            var fi = fe.next();
+            if (fi && !fi.is_dir) n++;
         }
+    } catch (e) {
+        return -1;  // unreadable
     }
+    return n;
 }
 
 function OnFileCountColumn(data) {
@@ -145,7 +140,7 @@ function flushBuffer() {
     try {
         var f = cacheFilePath();
         if (!f) { g_buffer = []; return; }
-        var ts = getFso().OpenTextFile(f, 8, true);  // 8 = append, create if missing
+        var ts = getFso().OpenTextFile(f, 8, true, -1);  // 8=append, create; -1=Unicode
         ts.Write(g_buffer.join("\r\n") + "\r\n");
         ts.Close();
     } catch (e) { /* non-fatal: counts still live in memory */ }
@@ -159,7 +154,7 @@ function loadCache() {
     if (!fso.FileExists(f)) return;
 
     var lines = 0, unique = 0;
-    var ts = fso.OpenTextFile(f, 1);  // read
+    var ts = fso.OpenTextFile(f, 1, false, -1);  // read as Unicode (matches writes)
     while (!ts.AtEndOfStream) {
         var line = ts.ReadLine();
         lines++;
@@ -180,7 +175,7 @@ function compact() {
         var f = cacheFilePath();
         if (!f) return;
         var fso = new ActiveXObject("Scripting.FileSystemObject");
-        var ts = fso.OpenTextFile(f, 2, true);  // 2 = overwrite
+        var ts = fso.OpenTextFile(f, 2, true, -1);  // 2=overwrite; -1=Unicode
         for (var k in g_cache) {
             ts.WriteLine(k + "|" + g_cache[k].m + "|" + g_cache[k].c);
         }
