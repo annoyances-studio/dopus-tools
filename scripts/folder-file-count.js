@@ -21,7 +21,14 @@
 // so it persists across column calls and folder navigation for the whole session.
 var g_cache = {};
 var g_cacheFile = null;
-var g_dirtySinceCompact = 0;
+var g_fso = null;
+var g_buffer = [];        // pending persistence lines, flushed in batches
+var FLUSH_EVERY = 100;    // write to disk after this many new counts
+
+function getFso() {
+    if (!g_fso) g_fso = new ActiveXObject("Scripting.FileSystemObject");
+    return g_fso;
+}
 
 function OnInit(initData) {
     initData.name = "FolderFileCount";
@@ -56,17 +63,24 @@ function mtimeToken(item) {
 }
 
 function countFiles(path) {
-    var n = 0;
+    // FSO's Files.Count returns the number directly, without building a DOpus Item
+    // per entry. Fall back to DOpus ReadDir on failure (FSO chokes on >260-char
+    // paths and some unicode; ReadDir handles them).
     try {
-        var fe = DOpus.FSUtil.ReadDir(path);  // shallow
-        while (fe && !fe.complete) {
-            var fi = fe.next();
-            if (fi && !fi.is_dir) n++;
-        }
+        return getFso().GetFolder(path).Files.Count;
     } catch (e) {
-        return -1;  // unreadable
+        try {
+            var n = 0;
+            var fe = DOpus.FSUtil.ReadDir(path);
+            while (fe && !fe.complete) {
+                var fi = fe.next();
+                if (fi && !fi.is_dir) n++;
+            }
+            return n;
+        } catch (e2) {
+            return -1;  // unreadable
+        }
     }
-    return n;
 }
 
 function OnFileCountColumn(data) {
@@ -87,13 +101,14 @@ function OnFileCountColumn(data) {
     if (c < 0) { data.value = "?"; return; }  // don't cache errors
 
     g_cache[key] = { m: mkey, c: c };
-    appendEntry(key, mkey, c);  // best-effort persistence
+    bufferEntry(key, mkey, c);  // batched persistence (no I/O per folder)
     data.value = String(c);
     data.sort = c;
 }
 
 function OnClearFolderCountCache() {
     g_cache = {};
+    g_buffer = [];
     try {
         var fso = new ActiveXObject("Scripting.FileSystemObject");
         var f = cacheFilePath();
@@ -114,20 +129,27 @@ function cacheFilePath() {
         if (!fso.FolderExists(dir)) fso.CreateFolder(dir);
         g_cacheFile = dir + "\\folder-counts.txt";
     } catch (e) {
-        DOpus.Output("FolderFileCount: no cache file (" + e + ") — in-memory only.");
+        DOpus.Output("FolderFileCount: no cache file (" + e + ") - in-memory only.");
     }
     return g_cacheFile;
 }
 
-function appendEntry(key, mkey, c) {
+function bufferEntry(key, mkey, c) {
+    g_buffer.push(key + "|" + mkey + "|" + c);
+    if (g_buffer.length >= FLUSH_EVERY) flushBuffer();
+}
+
+// One file-open writes the whole pending batch (vs one open per folder).
+function flushBuffer() {
+    if (g_buffer.length === 0) return;
     try {
         var f = cacheFilePath();
-        if (!f) return;
-        var fso = new ActiveXObject("Scripting.FileSystemObject");
-        var ts = fso.OpenTextFile(f, 8, true);  // 8 = append, create if missing
-        ts.WriteLine(key + "|" + mkey + "|" + c);
+        if (!f) { g_buffer = []; return; }
+        var ts = getFso().OpenTextFile(f, 8, true);  // 8 = append, create if missing
+        ts.Write(g_buffer.join("\r\n") + "\r\n");
         ts.Close();
-    } catch (e) { /* non-fatal: cache still works in memory */ }
+    } catch (e) { /* non-fatal: counts still live in memory */ }
+    g_buffer = [];
 }
 
 function loadCache() {
