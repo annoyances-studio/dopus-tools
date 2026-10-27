@@ -24,6 +24,16 @@ stays in keeping with the rest of the lab.
   two dates reliably (no object `<`, no `.Format`).
 - **Recovered files carry bogus timestamps** (NTFS 1601 / epoch 1970 "not set") → floor at year 1990 before
   trusting created/modified.
+- **Custom columns are script-only, so a cold count can't beat Opus's native one.** Any script column runs at
+  script speed; the only win a cache can offer is *re-visits* (Opus's native folder count recomputes on every
+  re-read). Don't chase a faster first pass (FolderFileCount).
+- **`FSO.Files.Count` is slower than `DOpus.FSUtil.ReadDir`**, not faster — tried as an "optimization" and
+  reverted. Prefer `ReadDir` for counting.
+- **`FSO.OpenTextFile` defaults to ASCII** and silently mangles Unicode paths (folders then never match on
+  reload — looks like "the cache doesn't work"). Pass format `-1` (Unicode) when reading/writing.
+- **Disk persistence for a column cache wasn't worth it.** Append-log + Unicode/BOM handling + external edits made
+  it fragile, and a per-call mtime check (`Date.Format`) cost more than it saved. FolderFileCount now keeps a plain
+  in-memory `path -> count` map for the session; `ClearFolderCountCache` forces a recount.
 
 ## Ideas / backlog (scriptable itches)
 

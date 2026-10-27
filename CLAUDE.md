@@ -41,8 +41,9 @@ a *"this file won't animate / renders wrong"* report becomes a **fixture in `tes
 session. Keep new logic in `core/`; keep `opus/` as glue. **Tests exist from increment #1, not bolted on later.**
 
 Same spirit for scripts: when a DOpus API quirk bites, **record it in `scripts/README.md`** ("gotchas learned so
-we don't relearn them") rather than just fixing it silently. Two already logged there: DOpus `Date` objects need
-`Day()`/`Month()`/`Year()` coercion (not `.Format()`), and recovered files carry bogus 1601/1970 timestamps.
+we don't relearn them") rather than just fixing it silently. E.g. DOpus `Date` objects need
+`Day()`/`Month()`/`Year()` coercion (not `.Format()`), and script columns can't beat Opus's native speed on a cold
+pass — only cache re-visits.
 
 ## Building a plugin (animview)
 
@@ -81,8 +82,9 @@ Builds the x64 Release DLL, tags `main`, uploads `animview.dll` + the libwebp no
 
 - **Git:** plain git, commit + push **direct to `main`** (no PR flow). Commit messages are scoped:
   `animview: …`, `scripts(FolderFileCount): …`, `release.ps1: …`.
-- **Commit trailer:** end commits Claude helped write with
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` — the README's AI-assistance disclosure commits to this.
+- **Commit trailer:** end commits Claude helped write with a `Co-Authored-By: Claude <noreply@anthropic.com>`
+  trailer, naming the model actually used (e.g. `Claude Opus 5.5`) — never copy a model name from older commits.
+  The README's AI-assistance disclosure commits to this trailer.
 - **License:** MPL-2.0 (`LICENSE`). Per-plugin third-party notices live beside each plugin (`THIRD-PARTY.md`).
 - **Provenance:** Leo Davidson's Opus plugins were **studied as a reference, not forked** — the viewer shell/core
   were written clean against the SDK. Keep it that way; credit lives in `THIRD-PARTY.md`.
